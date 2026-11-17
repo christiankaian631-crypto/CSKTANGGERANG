@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, LedgerItem, Outlet, CustomSupplier } from '../types';
 import { OUTLETS, INITIAL_STATE, getStoredCustomSuppliers, saveStoredCustomSuppliers } from '../constants';
-import { safeStorage } from '../lib/safeStorage';
+import { safeStorage, safeWindow } from '../lib/safeStorage';
 import ShareActions from './ShareActions';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -150,7 +150,7 @@ export const SupplierExpenseModule: React.FC<Props> = ({
 
   const [deactivatedSuppliers, setDeactivatedSuppliers] = useState<string[]>(() => {
     try {
-      const stored = typeof window !== 'undefined' ? localStorage.getItem('APP_DEACTIVATED_SUPPLIERS') : null;
+      const stored = safeStorage.getItem('APP_DEACTIVATED_SUPPLIERS');
       if (stored) return JSON.parse(stored);
     } catch (e) {}
     return [];
@@ -3998,7 +3998,7 @@ export const SupplierExpenseModule: React.FC<Props> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            if (window.confirm(`Hapus supplier "${cs.name}"?`)) {
+                            if (safeWindow.confirm(`Hapus supplier "${cs.name}"?`)) {
                               handleDeleteCustomSupplier(cs.id, cs.name);
                             }
                           }}

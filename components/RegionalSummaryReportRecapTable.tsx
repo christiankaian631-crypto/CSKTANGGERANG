@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { getAreaForOutlet } from '../constants';
+import { safeStorage } from '../lib/safeStorage';
 
 /**
  * Resolves the Patty Cash Budget for an outlet and month
@@ -74,32 +75,30 @@ export const resolvePattyCashBudget = (
     return st.pattyCashBudget;
   }
 
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      const keysToTry = [
-        outletName ? `PATTY_CASH_CAT_BUDGET_NOMINAL_${outletName}_${monthKey}` : null,
-        `PATTY_CASH_CAT_BUDGET_NOMINAL_${monthKey}`,
-        `PATTY_CASH_CAT_BUDGET_NOMINAL`,
-        `EXPENSE_CATEGORY_BUDGETS_${monthKey}`,
-        `EXPENSE_CATEGORY_BUDGETS`
-      ].filter(Boolean) as string[];
+  try {
+    const keysToTry = [
+      outletName ? `PATTY_CASH_CAT_BUDGET_NOMINAL_${outletName}_${monthKey}` : null,
+      `PATTY_CASH_CAT_BUDGET_NOMINAL_${monthKey}`,
+      `PATTY_CASH_CAT_BUDGET_NOMINAL`,
+      `EXPENSE_CATEGORY_BUDGETS_${monthKey}`,
+      `EXPENSE_CATEGORY_BUDGETS`
+    ].filter(Boolean) as string[];
 
-      for (const k of keysToTry) {
-        const item = localStorage.getItem(k);
-        if (item) {
-          const parsed = JSON.parse(item);
-          if (parsed && typeof parsed === 'object') {
-            const s = (Object.values(parsed) as any[]).reduce(
-              (acc: number, v: any) => acc + (Number(v) || 0),
-              0
-            );
-            if (s > 0) return s;
-          }
+    for (const k of keysToTry) {
+      const item = safeStorage.getItem(k);
+      if (item) {
+        const parsed = JSON.parse(item);
+        if (parsed && typeof parsed === 'object') {
+          const s = (Object.values(parsed) as any[]).reduce(
+            (acc: number, v: any) => acc + (Number(v) || 0),
+            0
+          );
+          if (s > 0) return s;
         }
       }
-    } catch {
-      // ignore
     }
+  } catch {
+    // ignore
   }
 
   if (mtdRevenue > 0) {

@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, LedgerItem, Outlet } from '../types';
 import { OUTLETS, INITIAL_STATE } from '../constants';
+import { safeStorage, safeWindow, safeClipboard } from '../lib/safeStorage';
 import ShareActions from './ShareActions';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -894,12 +895,12 @@ export const PattyCashExpenseModule: React.FC<Props> = ({
       return data.pattyCashCategoryBudgets;
     }
 
-    const localSaved = localStorage.getItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`);
+    const localSaved = safeStorage.getItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`);
     if (localSaved) {
       try { return JSON.parse(localSaved); } catch (e) { /* ignore */ }
     }
 
-    const globalSaved = localStorage.getItem('PATTY_CASH_CAT_BUDGET_NOMINAL');
+    const globalSaved = safeStorage.getItem('PATTY_CASH_CAT_BUDGET_NOMINAL');
     if (globalSaved) {
       try { return JSON.parse(globalSaved); } catch (e) { /* ignore */ }
     }
@@ -1172,8 +1173,8 @@ export const PattyCashExpenseModule: React.FC<Props> = ({
       onUpdate('pattyCashBudgetPercentage', totalPct);
     }
 
-    localStorage.setItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`, JSON.stringify(updatedNominals));
-    localStorage.setItem('PATTY_CASH_CAT_BUDGET_NOMINAL', JSON.stringify(updatedNominals));
+    safeStorage.setItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`, JSON.stringify(updatedNominals));
+    safeStorage.setItem('PATTY_CASH_CAT_BUDGET_NOMINAL', JSON.stringify(updatedNominals));
 
     setIsEditingBudgetModal(false);
     showToast?.(`Budget Kategori Patty Cash (Total: Rp ${totalNominal.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}) berhasil disimpan!`, 'success');
@@ -1237,14 +1238,15 @@ Leader In Charge : ${prLeader || ''}
 
   const handleCopyPurchaseRequestWA = () => {
     const text = generatePurchaseRequestText();
-    navigator.clipboard.writeText(text);
-    showToast?.('Template WhatsApp Purchase Request berhasil disalin!', 'success');
+    safeClipboard.writeText(text).then((ok) => {
+      if (ok) showToast?.('Template WhatsApp Purchase Request berhasil disalin!', 'success');
+    });
   };
 
   const handleSendPurchaseRequestWA = () => {
     const text = generatePurchaseRequestText();
     const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank');
+    safeWindow.open(url, '_blank');
   };
 
   // Excel Export Handler

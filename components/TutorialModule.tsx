@@ -1,6 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { ModuleType } from '../types';
 import { motion, AnimatePresence } from 'motion/react';
+import { safeStorage } from '../lib/safeStorage';
 
 interface Props {
   onSelectModule?: (module: ModuleType, tab?: any) => void;
@@ -14,7 +15,7 @@ export const TutorialModule: React.FC<Props> = ({ onSelectModule, showToast }) =
   const [searchQuery, setSearchQuery] = useState('');
   const [completedChecklist, setCompletedChecklist] = useState<Record<string, boolean>>(() => {
     try {
-      const saved = localStorage.getItem('tutorial_completed_checklist');
+      const saved = safeStorage.getItem('tutorial_completed_checklist');
       return saved ? JSON.parse(saved) : {};
     } catch {
       return {};
@@ -25,7 +26,7 @@ export const TutorialModule: React.FC<Props> = ({ onSelectModule, showToast }) =
     const next = { ...completedChecklist, [id]: !completedChecklist[id] };
     setCompletedChecklist(next);
     try {
-      localStorage.setItem('tutorial_completed_checklist', JSON.stringify(next));
+      safeStorage.setItem('tutorial_completed_checklist', JSON.stringify(next));
     } catch (e) {
       console.warn('Failed to save checklist:', e);
     }
@@ -986,7 +987,7 @@ _Generated automatically via Outlet Performance System_`;
               onClick={() => {
                 setCompletedChecklist({});
                 try {
-                  localStorage.removeItem('tutorial_completed_checklist');
+                  safeStorage.removeItem('tutorial_completed_checklist');
                   showToast?.('Checklist harian di-reset.', 'info');
                 } catch {}
               }}

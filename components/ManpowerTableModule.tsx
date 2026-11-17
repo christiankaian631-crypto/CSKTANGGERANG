@@ -519,7 +519,7 @@ export const ManpowerTableModule: React.FC<Props> = ({
 
   // Delete Entire Section
   const handleDeleteSection = (sectionId: string, sectionName: string) => {
-    if (!window.confirm(`Apakah Anda yakin ingin menghapus section "${sectionName}"?`)) return;
+    if (!safeWindow.confirm(`Apakah Anda yakin ingin menghapus section "${sectionName}"?`)) return;
     const updatedSections = manpowerState.sections.filter(sec => sec.id !== sectionId);
     const updatedData: OutletManpowerData = {
       ...manpowerState,
@@ -534,7 +534,8 @@ export const ManpowerTableModule: React.FC<Props> = ({
   // Add New Section to a Division
   const handleSaveNewSection = () => {
     if (!newSectionName.trim()) {
-      alert('Nama section tidak boleh kosong!');
+      if (showToast) showToast('Nama section tidak boleh kosong!', 'error');
+      else safeWindow.alert('Nama section tidak boleh kosong!');
       return;
     }
 
@@ -599,7 +600,8 @@ export const ManpowerTableModule: React.FC<Props> = ({
   // Save External Manpower
   const handleSaveExternal = () => {
     if (!extRole.trim()) {
-      alert('Posisi / Role Manpower External tidak boleh kosong!');
+      if (showToast) showToast('Posisi / Role Manpower External tidak boleh kosong!', 'error');
+      else safeWindow.alert('Posisi / Role Manpower External tidak boleh kosong!');
       return;
     }
 
@@ -682,7 +684,7 @@ export const ManpowerTableModule: React.FC<Props> = ({
 
   // Reset to Default Template
   const handleResetDefault = () => {
-    if (window.confirm(`Kembalikan data tabel Man Power untuk ${selectedOutlet} ke template awal standar?`)) {
+    if (safeWindow.confirm(`Kembalikan data tabel Man Power untuk ${selectedOutlet} ke template awal standar?`)) {
       const def = createDefaultManpowerData(selectedOutlet);
       setManpowerState(def);
       setHasUnsavedChanges(true);

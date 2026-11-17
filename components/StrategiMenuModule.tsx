@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { AppState, StrategyMenuItem, DailyStrategyRecord, Staff, StaffStrategyTarget, StaffMenuItemTarget } from '../types';
 import { getStoredStrategyCatalog, getAreaForOutlet } from '../constants';
 import { resolveOutletManpowerData } from '../lib/manpowerUtils';
+import { safeStorage, safeWindow } from '../lib/safeStorage';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
 import ExcelJS from 'exceljs';
@@ -282,7 +283,7 @@ export const StrategiMenuModule: React.FC<Props> = ({
           if (Array.isArray(d.items) && d.items.length > 0) {
             setCatalog(d.items);
             try {
-              localStorage.setItem('APP_STRATEGY_CATALOG', JSON.stringify(d.items));
+              safeStorage.setItem('APP_STRATEGY_CATALOG', JSON.stringify(d.items));
             } catch (e) {}
           }
         }
@@ -790,7 +791,7 @@ export const StrategiMenuModule: React.FC<Props> = ({
       showToast?.('Belum ada data strategi tersimpan di tanggal ini.', 'info');
       return;
     }
-    if (!window.confirm(`Hapus seluruh data menu strategi untuk tanggal ${selectedDate}?`)) return;
+    if (!safeWindow.confirm(`Hapus seluruh data menu strategi untuk tanggal ${selectedDate}?`)) return;
     setIsSaving(true);
     try {
       const nextDaily = { ...(data.dailyStrategy || {}) };
@@ -1106,7 +1107,7 @@ ${notes || '-'}`;
   const handleShareStaffWa = (shiftMode: 'LUNCH' | 'DINNER' | 'BOTH') => {
     const text = generateStaffTargetWaText(shiftMode);
     const url = `https://api.whatsapp.com/send?text=${encodeURIComponent(text)}`;
-    window.open(url, '_blank');
+    safeWindow.open(url, '_blank');
   };
 
   // Export to Excel

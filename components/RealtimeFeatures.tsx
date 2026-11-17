@@ -12,9 +12,11 @@ import {
   serverTimestamp, 
   Timestamp
 } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 import { motion, AnimatePresence } from 'motion/react';
 import { ChatMessage, Presence, Outlet } from '../types';
-import { handleFirestoreError, OperationType, isQuotaExceeded } from '../services/cloudService';
+import { isQuotaExceeded } from '../services/cloudService';
+import { safeStorage } from '../lib/safeStorage';
 
 interface Props {
   user: { email: string; selectedOutlet?: Outlet; photoURL?: string; displayName?: string };
@@ -63,8 +65,21 @@ const RealtimeFeatures: React.FC<Props> = ({
   const [newMessage, setNewMessage] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [unreadCount, setUnreadCount] = useState(0);
+  const isChatOpenRef = useRef(isChatOpen);
+  useEffect(() => {
+    isChatOpenRef.current = isChatOpen;
+  }, [isChatOpen]);
+
+  const [authUid, setAuthUid] = useState<string | null>(() => auth.currentUser?.uid || null);
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      setAuthUid(fbUser?.uid || null);
+    });
+    return unsub;
+  }, []);
 
   const otherOnlineUsers = React.useMemo(() => {
+    if (!Array.isArray(onlineUsers)) return [];
     return onlineUsers.filter(u => u.email?.toLowerCase() !== user.email?.toLowerCase());
   }, [onlineUsers, user.email]);
 
@@ -80,31 +95,22 @@ const RealtimeFeatures: React.FC<Props> = ({
 
   // Dynamic Presence Session Settings
   const [onlineTimeLimit, setOnlineTimeLimit] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('ONLINE_TIME_LIMIT');
-      return saved ? parseInt(saved, 10) : 1440;
-    } catch {
-      return 1440;
-    }
+    const saved = safeStorage.getItem('ONLINE_TIME_LIMIT');
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    return !isNaN(parsed) ? parsed : 1440;
   });
 
   const [maxOnlineUsers, setMaxOnlineUsers] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('MAX_ONLINE_USERS');
-      return saved ? parseInt(saved, 10) : 10;
-    } catch {
-      return 10;
-    }
+    const saved = safeStorage.getItem('MAX_ONLINE_USERS');
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    return !isNaN(parsed) ? parsed : 10;
   });
 
   // Daily Input Quota Settings (default 2500 slots to avoid premature quota exhausted warnings)
   const [maxDailyInputs, setMaxDailyInputs] = useState<number>(() => {
-    try {
-      const saved = localStorage.getItem('MAX_DAILY_INPUT_LIMIT');
-      return saved ? parseInt(saved, 10) : 2500;
-    } catch {
-      return 2500;
-    }
+    const saved = safeStorage.getItem('MAX_DAILY_INPUT_LIMIT');
+    const parsed = saved ? parseInt(saved, 10) : NaN;
+    return !isNaN(parsed) ? parsed : 2500;
   });
 
   // Real-time Countdown Timer until Midnight (Daily resets)
@@ -163,23 +169,23 @@ const RealtimeFeatures: React.FC<Props> = ({
     const outletStore = outletMonthlyData?.[monthKey] || {};
 
     if (globalData) {
-      if (globalData.guestComplaints) {
-        complaintCount = globalData.guestComplaints.filter((c: any) => c.date === today).length;
+      if (Array.isArray(globalData.guestComplaints)) {
+        complaintCount = globalData.guestComplaints.filter((c: any) => c?.date === today).length;
       }
-      if (globalData.dailyOvertime?.[today]) {
+      if (Array.isArray(globalData.dailyOvertime?.[today])) {
         overtimeCount = globalData.dailyOvertime[today].length;
       }
-      if (globalData.dailyAttendance?.[today]) {
+      if (Array.isArray(globalData.dailyAttendance?.[today])) {
         attendanceCount = globalData.dailyAttendance[today].length;
       }
-      if (globalData.dailyCPA?.[today]) {
+      if (Array.isArray(globalData.dailyCPA?.[today])) {
         cpaCount = globalData.dailyCPA[today].length;
       }
-      if (globalData.dailyExternalAudit?.[today]) {
+      if (Array.isArray(globalData.dailyExternalAudit?.[today])) {
         auditCount = globalData.dailyExternalAudit[today].length;
       }
-      if (globalData.leaveRecords) {
-        leaveCount = globalData.leaveRecords.filter((r: any) => r.date === today).length;
+      if (Array.isArray(globalData.leaveRecords)) {
+        leaveCount = globalData.leaveRecords.filter((r: any) => r?.date === today).length;
       }
     }
 
@@ -187,7 +193,7 @@ const RealtimeFeatures: React.FC<Props> = ({
       if (outletStore.sales?.dailyRecording?.[today]) {
         revenueCount = 1;
       }
-      if (outletStore.dailyGSI?.[today]) {
+      if (Array.isArray(outletStore.dailyGSI?.[today])) {
         gsiCount = outletStore.dailyGSI[today].length;
       }
       if (outletStore.dailyGoogleReview?.[today]) {
@@ -265,15 +271,15 @@ const RealtimeFeatures: React.FC<Props> = ({
           if (json.config) {
             if (json.config.maxDailyInputs !== undefined) {
               setMaxDailyInputs(json.config.maxDailyInputs);
-              localStorage.setItem('MAX_DAILY_INPUT_LIMIT', json.config.maxDailyInputs.toString());
+              safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', json.config.maxDailyInputs.toString());
             }
             if (json.config.onlineTimeLimit !== undefined) {
               setOnlineTimeLimit(json.config.onlineTimeLimit);
-              localStorage.setItem('ONLINE_TIME_LIMIT', json.config.onlineTimeLimit.toString());
+              safeStorage.setItem('ONLINE_TIME_LIMIT', json.config.onlineTimeLimit.toString());
             }
             if (json.config.maxOnlineUsers !== undefined) {
               setMaxOnlineUsers(json.config.maxOnlineUsers);
-              localStorage.setItem('MAX_ONLINE_USERS', json.config.maxOnlineUsers.toString());
+              safeStorage.setItem('MAX_ONLINE_USERS', json.config.maxOnlineUsers.toString());
             }
           }
         }
@@ -281,7 +287,7 @@ const RealtimeFeatures: React.FC<Props> = ({
     };
     fetchServerConfig();
 
-    if (!auth.currentUser || isQuotaExceeded()) return;
+    if (!authUid || isQuotaExceeded()) return;
 
     try {
       const configRef = doc(db, 'system_data', 'system_config');
@@ -290,22 +296,22 @@ const RealtimeFeatures: React.FC<Props> = ({
           const data = snapshot.data();
           if (data.maxDailyInputs !== undefined) {
             setMaxDailyInputs(data.maxDailyInputs);
-            localStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
+            safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
           }
           if (data.onlineTimeLimit !== undefined) {
             setOnlineTimeLimit(data.onlineTimeLimit);
-            localStorage.setItem('ONLINE_TIME_LIMIT', data.onlineTimeLimit.toString());
+            safeStorage.setItem('ONLINE_TIME_LIMIT', data.onlineTimeLimit.toString());
           }
           if (data.maxOnlineUsers !== undefined) {
             setMaxOnlineUsers(data.maxOnlineUsers);
-            localStorage.setItem('MAX_ONLINE_USERS', data.maxOnlineUsers.toString());
+            safeStorage.setItem('MAX_ONLINE_USERS', data.maxOnlineUsers.toString());
           }
         }
       }, () => {});
 
       return unsubscribe;
     } catch (e) {}
-  }, [auth.currentUser]);
+  }, [authUid]);
 
   // Synchronize presence only via fast server API (zero Firestore snapshot)
   useEffect(() => {
@@ -335,7 +341,7 @@ const RealtimeFeatures: React.FC<Props> = ({
 
   // Listen to Chat Messages
   useEffect(() => {
-    if (!user.email || !auth.currentUser) return;
+    if (!user.email || !authUid) return;
 
     // Use serverTime for more reliable multi-user sync across different timezones
     const q = query(
@@ -346,31 +352,38 @@ const RealtimeFeatures: React.FC<Props> = ({
 
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const msgs: ChatMessage[] = [];
-      snapshot.forEach((doc) => {
-        const data = doc.data();
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as any;
+        const resolvedTimestamp =
+          typeof data.serverTime?.toDate === 'function'
+            ? data.serverTime.toDate().toISOString()
+            : typeof data.serverTime?.seconds === 'number'
+            ? new Date(data.serverTime.seconds * 1000).toISOString()
+            : typeof data.timestamp === 'string' && data.timestamp
+            ? data.timestamp
+            : new Date().toISOString();
+
         msgs.push({ 
-          id: doc.id, 
+          id: docSnap.id, 
           ...data,
-          // Fallback for timestamp if serverTime is still null (local guess)
-          timestamp: data.serverTime ? data.serverTime.toDate().toISOString() : (data.timestamp || new Date().toISOString())
+          timestamp: resolvedTimestamp
         } as ChatMessage);
       });
       // Filter out duplicates just in case (optional but safe)
       setMessages(msgs.reverse());
       
-      if (!isChatOpen && !snapshot.metadata.hasPendingWrites) {
+      if (!isChatOpenRef.current && !snapshot.metadata.hasPendingWrites) {
         const addedCount = snapshot.docChanges().filter(c => c.type === 'added').length;
         if (addedCount > 0) {
           setUnreadCount(prev => prev + addedCount);
         }
       }
     }, (error) => {
-      console.error('[Chat] Listener failed:', error);
-      handleFirestoreError(error, OperationType.LISTEN, 'chat_messages');
+      console.warn('[Chat] Listener notice:', error);
     });
 
     return unsubscribe;
-  }, [isChatOpen, user.email, auth.currentUser]);
+  }, [user.email, authUid]);
 
   useEffect(() => {
     if (isChatOpen) {
@@ -385,7 +398,7 @@ const RealtimeFeatures: React.FC<Props> = ({
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !user.email) return;
+    if (!newMessage.trim() || !user.email || !auth.currentUser) return;
 
     const text = newMessage.trim();
     setNewMessage('');
@@ -404,7 +417,7 @@ const RealtimeFeatures: React.FC<Props> = ({
         outlet: user.selectedOutlet || 'UNKNOWN'
       });
     } catch (err) {
-      handleFirestoreError(err, OperationType.CREATE, 'chat_messages');
+      console.warn('[Chat] Send message failed:', err);
     }
   };
 

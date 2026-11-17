@@ -5,6 +5,7 @@ import ShareActions from "./ShareActions";
 import { motion, AnimatePresence } from "motion/react";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
+import { safeStorage } from "../lib/safeStorage";
 
 interface Props {
   data: SalesData;
@@ -159,7 +160,7 @@ const SalesModule: React.FC<Props> = ({
           const d = snap.data();
           try {
             if (typeof window !== 'undefined') {
-              localStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(d));
+              safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(d));
             }
           } catch (e) {}
           setPromoConfigVersion(v => v + 1);
@@ -182,7 +183,7 @@ const SalesModule: React.FC<Props> = ({
 
     // Check local storage or promoSettings
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem('APP_PROMO_SETTINGS') : null;
+      const raw = typeof window !== 'undefined' ? safeStorage.getItem('APP_PROMO_SETTINGS') : null;
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed?.customBankPromos) && parsed.customBankPromos.length > 0) {

@@ -18,6 +18,7 @@ import {
 } from '../constants';
 import { doc, getDoc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
+import { safeStorage } from '../lib/safeStorage';
 
 interface Props {
   isOpen: boolean;
@@ -79,7 +80,7 @@ export const OutletControlModal: React.FC<Props> = ({
   // Promo Settings State
   const [promoSettings, setPromoSettings] = useState<PromoSettings>(() => {
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem('APP_PROMO_SETTINGS') : null;
+      const raw = safeStorage.getItem('APP_PROMO_SETTINGS');
       if (raw) return JSON.parse(raw);
     } catch (e) {}
     return { bankPromoEnabled: true, promoEnabled: true };
@@ -88,7 +89,7 @@ export const OutletControlModal: React.FC<Props> = ({
   // Custom Promos Management State
   const [bankPromosList, setBankPromosList] = useState<BankingPromoItem[]>(() => {
     try {
-      const raw = typeof window !== 'undefined' ? localStorage.getItem('APP_PROMO_SETTINGS') : null;
+      const raw = safeStorage.getItem('APP_PROMO_SETTINGS');
       if (raw) {
         const parsed = JSON.parse(raw);
         if (Array.isArray(parsed?.customBankPromos) && parsed.customBankPromos.length > 0) {
@@ -130,7 +131,7 @@ export const OutletControlModal: React.FC<Props> = ({
   const [customSuppliers, setCustomSuppliers] = useState<CustomSupplier[]>(() => getStoredCustomSuppliers());
   const [deactivatedSuppliers, setDeactivatedSuppliers] = useState<string[]>(() => {
     try {
-      const stored = typeof window !== 'undefined' ? localStorage.getItem('APP_DEACTIVATED_SUPPLIERS') : null;
+      const stored = safeStorage.getItem('APP_DEACTIVATED_SUPPLIERS');
       if (stored) return JSON.parse(stored);
     } catch (e) {}
     return [];
@@ -148,6 +149,8 @@ export const OutletControlModal: React.FC<Props> = ({
 
   // Load Firestore configurations once when modal opens
   useEffect(() => {
+    if (!isOpen) return;
+
     const fetchData = async () => {
       try {
         // 1. Fetch outlet_control
@@ -176,8 +179,8 @@ export const OutletControlModal: React.FC<Props> = ({
             setBankPromosList(data.customBankPromos);
           }
           try {
+            safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(data));
             if (typeof window !== 'undefined') {
-              localStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(data));
               window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: data }));
             }
           } catch (e) {}
@@ -225,8 +228,8 @@ export const OutletControlModal: React.FC<Props> = ({
           const data = deactSnap.data();
           if (Array.isArray(data.deactivated)) {
             setDeactivatedSuppliers(data.deactivated);
+            safeStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(data.deactivated));
             if (typeof window !== 'undefined') {
-              localStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(data.deactivated));
               window.dispatchEvent(new CustomEvent('appDeactivatedSuppliersChanged', { detail: data.deactivated }));
             }
           }
@@ -237,7 +240,7 @@ export const OutletControlModal: React.FC<Props> = ({
     };
 
     fetchData();
-  }, []);
+  }, [isOpen]);
 
   useEffect(() => {
     const handleSupChange = (e: any) => {
@@ -415,8 +418,8 @@ export const OutletControlModal: React.FC<Props> = ({
 
   const syncPromoSettingsEverywhere = async (newSettings: PromoSettings, targetPromoList: BankingPromoItem[]) => {
     try {
+      safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(newSettings));
       if (typeof window !== 'undefined') {
-        localStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(newSettings));
         window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: newSettings }));
       }
       const configRef = doc(db, 'system_config', 'promo_settings');
@@ -826,8 +829,8 @@ export const OutletControlModal: React.FC<Props> = ({
     }
     setDeactivatedSuppliers(updatedDeactivated);
     try {
+      safeStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(updatedDeactivated));
       if (typeof window !== 'undefined') {
-        localStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(updatedDeactivated));
         window.dispatchEvent(new CustomEvent('appDeactivatedSuppliersChanged', { detail: updatedDeactivated }));
       }
       const deactDocRef = doc(db, 'system_config', 'deactivated_suppliers');

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { AppState, Outlet, BankingPromoItem } from '../types';
 import { OUTLETS, MONTHS, getStoredBankPromos, getActiveOutletNames } from '../constants';
+import { safeStorage } from '../lib/safeStorage';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { doc, getDoc } from 'firebase/firestore';
@@ -54,9 +55,7 @@ export const RegionalPromoRecapTable: React.FC<Props> = ({
         if (snap.exists()) {
           const d = snap.data();
           try {
-            if (typeof window !== 'undefined') {
-              localStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(d));
-            }
+            safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(d));
           } catch (e) {}
           setPromoConfigVersion(v => v + 1);
         }

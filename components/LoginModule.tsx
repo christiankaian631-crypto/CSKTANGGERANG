@@ -1,10 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { auth, db } from '../firebase';
 import { GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User } from 'firebase/auth';
 import { collection, getDocs } from 'firebase/firestore';
 import { Outlet, ModuleType, OutletConfig, Presence } from '../types';
 import { OUTLETS, getActiveOutletConfigs } from '../constants';
-import { safeStorage } from '../lib/safeStorage';
+import { safeStorage, safeSessionStorage, safeWindow } from '../lib/safeStorage';
 import { OutletControlModal } from './OutletControlModal';
 
 interface Props {
@@ -48,6 +48,7 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
   const [loginOnlineUsers, setLoginOnlineUsers] = useState<Presence[]>([]);
   const [loginOfflineUsers, setLoginOfflineUsers] = useState<Presence[]>([]);
   const [showPresencePanel, setShowPresencePanel] = useState<boolean>(true);
+  const anonymousAuthDisabledRef = useRef<boolean>(false);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -70,12 +71,10 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
 
   // Poll Online & Offline users opening the same web app (without snapshot)
   useEffect(() => {
-    let tabId = '';
-    try {
-      tabId = sessionStorage.getItem('SH_TAB_SESSION_ID') || Math.random().toString(36).substring(2, 9);
-      sessionStorage.setItem('SH_TAB_SESSION_ID', tabId);
-    } catch {
-      tabId = 'login';
+    let tabId = safeSessionStorage.getItem('SH_TAB_SESSION_ID');
+    if (!tabId) {
+      tabId = Math.random().toString(36).substring(2, 9);
+      safeSessionStorage.setItem('SH_TAB_SESSION_ID', tabId);
     }
 
     const pingLoginPresence = async () => {
@@ -175,26 +174,36 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
     }
 
     setLoading(true);
-
     try {
-      if (!auth.currentUser) {
-        const { signInAnonymously } = await import('firebase/auth');
-        await Promise.race([
-          signInAnonymously(auth),
-          new Promise(res => setTimeout(res, 2000))
-        ]);
+      if (!auth.currentUser && !anonymousAuthDisabledRef.current) {
+        try {
+          const { signInAnonymously } = await import('firebase/auth');
+          await Promise.race([
+            signInAnonymously(auth),
+            new Promise(res => setTimeout(res, 1200))
+          ]);
+        } catch (err: any) {
+          const code = String(err?.code || '');
+          if (
+            code === 'auth/operation-not-allowed' ||
+            code === 'auth/admin-restricted-operation' ||
+            code === 'auth/unauthorized-domain'
+          ) {
+            anonymousAuthDisabledRef.current = true;
+          }
+          console.warn('[LoginModule] Auth anonymous notice:', err);
+        }
       }
-    } catch (err) {
-      console.warn('[LoginModule] Auth anonymous notice:', err);
+
+      safeStorage.setItem('MANUAL_USER_EMAIL', cleanEmail);
+      safeStorage.setItem('BARN_USER_SESSION', cleanEmail);
+      safeStorage.setItem('BARN_SELECTED_OUTLET', selectedOutlet);
+
+      showToast?.(`Masuk sebagai ${cleanEmail} di ${selectedOutlet}`, 'success');
+      await Promise.resolve(onLogin(cleanEmail, selectedOutlet as Outlet));
+    } finally {
+      setLoading(false);
     }
-
-    safeStorage.setItem('MANUAL_USER_EMAIL', cleanEmail);
-    safeStorage.setItem('BARN_USER_SESSION', cleanEmail);
-    safeStorage.setItem('BARN_SELECTED_OUTLET', selectedOutlet);
-
-    showToast?.(`Masuk sebagai ${cleanEmail} di ${selectedOutlet}`, 'success');
-    onLogin(cleanEmail, selectedOutlet as Outlet);
-    setLoading(false);
   };
 
   const handleGoogleLogin = async () => {
@@ -317,7 +326,7 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
           </button>
 
           <button
-            onClick={() => window.open(window.location.href, '_blank')}
+            onClick={() => safeWindow.open(window.location.href, '_blank')}
             type="button"
             title="Buka di Tab Baru untuk tampilan penuh & login lancar"
             className="flex items-center gap-1.5 px-3.5 py-2.5 rounded-2xl bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white transition-all border border-white/10 text-[10px] sm:text-xs font-black uppercase tracking-wider active:scale-95 cursor-pointer"

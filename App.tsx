@@ -2,7 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { ModuleType, AppState, User, SyncStatus, Outlet, Notification, LeaveRecord, CustomSupplier, Presence, PresenceEvent } from './types';
 import { INITIAL_STATE, ROLES_BY_DIVISION, DIVISIONS, OUTLETS, getActiveOutletNames, getStoredCustomSuppliers } from './constants';
 import { fetchUserData, saveGlobalData, saveOutletData, startRealtimeListener, startNotificationListener, isQuotaExceeded, resetQuotaExceeded, fetchAllOutletsData, startAllOutletsListener, testConnection } from './services/cloudService';
-import { safeStorage, safeClipboard, safeWindow } from './lib/safeStorage';
+import { safeStorage, safeSessionStorage, safeClipboard, safeWindow } from './lib/safeStorage';
 import { toLocalDateStr } from './lib/dateUtils';
 import { calculateLeaveEntitlement } from './lib/staffUtils';
 import { auth, db } from './firebase';
@@ -282,6 +282,13 @@ const App: React.FC = () => {
   const maxDailyInputLimitRef = useRef<number>(2500);
   const flushPendingSyncRef = useRef<(() => Promise<boolean>) | null>(null);
   const isLoggingOutRef = useRef(false);
+  const inFlightLoginRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
+  const activeSessionKeyRef = useRef<string | null>(null);
+  const anonymousAuthDisabledRef = useRef<boolean>(false);
+  const globalDataRef = useRef(globalData);
+  useEffect(() => {
+    globalDataRef.current = globalData;
+  }, [globalData]);
 
   // Synchronize dynamic settings (like Batas Maksimal Input Harian) across users in real-time
   useEffect(() => {
@@ -293,13 +300,13 @@ const App: React.FC = () => {
       .then(data => {
         if (data?.config?.maxDailyInputs !== undefined) {
           maxDailyInputLimitRef.current = data.config.maxDailyInputs;
-          localStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.config.maxDailyInputs.toString());
+          safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.config.maxDailyInputs.toString());
         }
       })
       .catch(() => {});
 
     try {
-      const saved = localStorage.getItem('MAX_DAILY_INPUT_LIMIT');
+      const saved = safeStorage.getItem('MAX_DAILY_INPUT_LIMIT');
       if (saved) maxDailyInputLimitRef.current = parseInt(saved, 10);
     } catch (e) {
       // Ignore
@@ -313,7 +320,7 @@ const App: React.FC = () => {
         const data = snapshot.data();
         if (data.maxDailyInputs !== undefined) {
           maxDailyInputLimitRef.current = data.maxDailyInputs;
-          localStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
+          safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
         }
       }
     }).catch((error) => {
@@ -416,13 +423,31 @@ const App: React.FC = () => {
   useEffect(() => {
     let isMounted = true;
 
+    const authReadyTimeout = setTimeout(() => {
+      if (isMounted) {
+        setIsAuthReady(true);
+      }
+    }, 1500);
+
     const ensureAuth = async () => {
+      if (anonymousAuthDisabledRef.current) return;
       try {
         if (!auth.currentUser) {
           const { signInAnonymously } = await import('firebase/auth');
-          await signInAnonymously(auth);
+          await Promise.race([
+            signInAnonymously(auth),
+            new Promise((resolve) => setTimeout(resolve, 1200))
+          ]);
         }
-      } catch (err) {
+      } catch (err: any) {
+        const code = err?.code || '';
+        if (
+          code === 'auth/operation-not-allowed' ||
+          code === 'auth/admin-restricted-operation' ||
+          code === 'auth/unauthorized-domain'
+        ) {
+          anonymousAuthDisabledRef.current = true;
+        }
         console.warn('[Auth] Anonymous bootstrap skipped/failed:', err);
       }
     };
@@ -440,13 +465,17 @@ const App: React.FC = () => {
       if (resolvedEmail && !isLoggingOutRef.current) {
         const savedOutlet = safeStorage.getItem('BARN_SELECTED_OUTLET') as Outlet;
         if (savedOutlet && !isLoggingOutRef.current) {
-          handleLogin(resolvedEmail, savedOutlet);
+          const sessionKey = `${resolvedEmail.trim().toLowerCase()}::${savedOutlet}`;
+          if (activeSessionKeyRef.current !== sessionKey) {
+            handleLogin(resolvedEmail, savedOutlet);
+          }
         } else {
           setUser({ email: resolvedEmail, isLoggedIn: false, photoURL, displayName });
         }
       } else {
         setUser({ email: '', isLoggedIn: false });
       }
+      clearTimeout(authReadyTimeout);
       setIsAuthReady(true);
     });
 
@@ -454,6 +483,7 @@ const App: React.FC = () => {
 
     return () => {
       isMounted = false;
+      clearTimeout(authReadyTimeout);
       unsubscribe();
     };
   }, []);
@@ -470,10 +500,10 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!(user.isLoggedIn && user.email) && !isPublicView) return;
 
-    let tabSessionId = sessionStorage.getItem('SH_TAB_SESSION_ID');
+    let tabSessionId = safeSessionStorage.getItem('SH_TAB_SESSION_ID');
     if (!tabSessionId) {
       tabSessionId = Math.random().toString(36).substring(2, 9);
-      sessionStorage.setItem('SH_TAB_SESSION_ID', tabSessionId);
+      safeSessionStorage.setItem('SH_TAB_SESSION_ID', tabSessionId);
     }
 
     const storedEmail = safeStorage.getItem('MANUAL_USER_EMAIL') || safeStorage.getItem('BARN_USER_SESSION') || '';
@@ -749,7 +779,7 @@ const App: React.FC = () => {
   }, [user.isLoggedIn, user.email, user.selectedOutlet, user.photoURL, user.displayName, auth.currentUser?.uid, isPublicView, enqueuePresencePopups]);
   
   useEffect(() => {
-    if (!globalData.staffList) return;
+    if (!Array.isArray(globalData.staffList)) return;
     
     const today = new Date();
     const tomorrow = new Date();
@@ -763,9 +793,10 @@ const App: React.FC = () => {
     const bdayNotifs: Notification[] = [];
 
     globalData.staffList.forEach(staff => {
-      if (!staff.birthDate || staff.status === 'RESIGNED_PROSEDUR' || staff.status === 'RESIGNED_NON_PROSEDUR') return;
+      if (!staff || !staff.birthDate || staff.status === 'RESIGNED_PROSEDUR' || staff.status === 'RESIGNED_NON_PROSEDUR') return;
       
       const birthDateObj = new Date(staff.birthDate);
+      if (isNaN(birthDateObj.getTime())) return;
       const bMonth = birthDateObj.getMonth() + 1;
       const bDay = birthDateObj.getDate();
       
@@ -1249,29 +1280,29 @@ const App: React.FC = () => {
     let expenseCount = 0;
 
     if (dataStore) {
-      if (dataStore.guestComplaints) {
-        complaintCount = dataStore.guestComplaints.filter((c: any) => c.date === today).length;
+      if (Array.isArray(dataStore.guestComplaints)) {
+        complaintCount = dataStore.guestComplaints.filter((c: any) => c?.date === today).length;
       }
-      if (dataStore.dailyOvertime?.[today]) {
+      if (Array.isArray(dataStore.dailyOvertime?.[today])) {
         overtimeCount = dataStore.dailyOvertime[today].length;
       }
-      if (dataStore.dailyAttendance?.[today]) {
+      if (Array.isArray(dataStore.dailyAttendance?.[today])) {
         attendanceCount = dataStore.dailyAttendance[today].length;
       }
-      if (dataStore.dailyCPA?.[today]) {
+      if (Array.isArray(dataStore.dailyCPA?.[today])) {
         cpaCount = dataStore.dailyCPA[today].length;
       }
-      if (dataStore.dailyExternalAudit?.[today]) {
+      if (Array.isArray(dataStore.dailyExternalAudit?.[today])) {
         auditCount = dataStore.dailyExternalAudit[today].length;
       }
-      if (dataStore.leaveRecords) {
-        leaveCount = dataStore.leaveRecords.filter((r: any) => r.date === today).length;
+      if (Array.isArray(dataStore.leaveRecords)) {
+        leaveCount = dataStore.leaveRecords.filter((r: any) => r?.date === today).length;
       }
       // New requested additions
       if (dataStore.sales?.dailyRecording?.[today]) {
         revenueCount = 1;
       }
-      if (dataStore.dailyGSI?.[today]) {
+      if (Array.isArray(dataStore.dailyGSI?.[today])) {
         gsiCount = dataStore.dailyGSI[today].length;
       }
       if (dataStore.dailyGoogleReview?.[today]) {
@@ -1300,41 +1331,41 @@ const App: React.FC = () => {
   }, []);
 
   const setGlobalData = useCallback((updater: any) => {
-    setGlobalDataState(prev => {
-      const next = typeof updater === 'function' ? updater(prev) : { ...prev, ...updater };
-      
-      try {
-        // Replicate these changes directly into the current active month in outletMonthlyDataState!
-        setOutletMonthlyDataState(prevMonths => {
-          const mKey = filters.month;
-          const nextMonths: Record<string, any> = {
-            ...prevMonths,
-            [mKey]: {
-              ...INITIAL_STATE,
-              ...(prevMonths[mKey] || {}),
-              ...next
-            }
-          };
-          if (next.manpowerData && typeof next.manpowerData === 'object') {
-            for (let m = 0; m < 12; m++) {
-              const k = m.toString();
-              nextMonths[k] = {
-                ...INITIAL_STATE,
-                ...(nextMonths[k] || {}),
-                manpowerData: {
-                  ...(nextMonths[k]?.manpowerData || {}),
-                  ...next.manpowerData
-                }
-              };
-            }
+    const prev = globalDataRef.current;
+    const next = typeof updater === 'function' ? updater(prev) : { ...prev, ...updater };
+    globalDataRef.current = next;
+    setGlobalDataState(next);
+
+    try {
+      // Replicate these changes directly into the current active month in outletMonthlyDataState
+      setOutletMonthlyDataState(prevMonths => {
+        const mKey = filters.month;
+        const nextMonths: Record<string, any> = {
+          ...prevMonths,
+          [mKey]: {
+            ...INITIAL_STATE,
+            ...(prevMonths[mKey] || {}),
+            ...next
           }
-          return nextMonths;
-        });
-      } catch (e) {
-        console.error(e);
-      }
-      return next;
-    });
+        };
+        if (next.manpowerData && typeof next.manpowerData === 'object') {
+          for (let m = 0; m < 12; m++) {
+            const k = m.toString();
+            nextMonths[k] = {
+              ...INITIAL_STATE,
+              ...(nextMonths[k] || {}),
+              manpowerData: {
+                ...(nextMonths[k]?.manpowerData || {}),
+                ...next.manpowerData
+              }
+            };
+          }
+        }
+        return nextMonths;
+      });
+    } catch (e) {
+      console.error(e);
+    }
   }, [filters.month]);
 
   const setOutletMonthlyData = useCallback((updater: any) => {
@@ -1362,25 +1393,40 @@ const App: React.FC = () => {
 
   const handleLogin = async (email: string, outlet: Outlet) => {
     if (isLoggingOutRef.current) return;
-    isHydrated.current = false;
-    setIsRefreshing(true);
 
     const cleanEmail = (email || '').trim().toLowerCase();
     const outletKey = outlet;
+    const sessionKey = `${cleanEmail}::${outletKey}`;
 
-    try {
-      // 1. Ensure Firebase authentication is initialized (non-blocking race)
-      if (!auth.currentUser) {
-        try {
-          const { signInAnonymously } = await import('firebase/auth');
-          await Promise.race([
-            signInAnonymously(auth),
-            new Promise(res => setTimeout(res, 2000))
-          ]);
-        } catch (authErr) {
-          console.warn('[handleLogin] Auth anonymous notice:', authErr);
+    if (inFlightLoginRef.current && inFlightLoginRef.current.key === sessionKey) {
+      return inFlightLoginRef.current.promise;
+    }
+
+    const loginPromise = (async () => {
+      isHydrated.current = false;
+      setIsRefreshing(true);
+
+      try {
+        // 1. Ensure Firebase authentication is initialized (non-blocking race, skipped if disabled)
+        if (!auth.currentUser && !anonymousAuthDisabledRef.current) {
+          try {
+            const { signInAnonymously } = await import('firebase/auth');
+            await Promise.race([
+              signInAnonymously(auth),
+              new Promise(res => setTimeout(res, 1200))
+            ]);
+          } catch (authErr: any) {
+            const code = authErr?.code || '';
+            if (
+              code === 'auth/operation-not-allowed' ||
+              code === 'auth/admin-restricted-operation' ||
+              code === 'auth/unauthorized-domain'
+            ) {
+              anonymousAuthDisabledRef.current = true;
+            }
+            console.warn('[handleLogin] Auth anonymous notice:', authErr);
+          }
         }
-      }
 
       // Check for local instant backup before remote fetch to prevent blank/lost data
       const localBackupKey = `BARN_LOCAL_BACKUP_${outletKey}`;
@@ -1466,12 +1512,16 @@ const App: React.FC = () => {
 
         // Clean staffList in cloudData if exists
         if (cloudData.staffList) {
+          const rawList = Array.isArray(cloudData.staffList)
+            ? cloudData.staffList
+            : (typeof cloudData.staffList === 'object' ? Object.values(cloudData.staffList) : []);
           const seen = new Set();
-          cloudData.staffList = cloudData.staffList
+          cloudData.staffList = rawList
+            .filter((s: any) => s && typeof s === 'object')
             .sort(sortStaffList)
             .filter((s: any) => {
-              if (seen.has(s.id)) return false;
-              seen.add(s.id);
+              if (s.id && seen.has(s.id)) return false;
+              if (s.id) seen.add(s.id);
               return true;
             })
             .map((s: any) => {
@@ -1497,20 +1547,21 @@ const App: React.FC = () => {
         } = cloudData;
         
         const hydratedGlobal: any = {
-          staffList: staffList || INITIAL_STATE.staffList,
-          leaveRecords: leaveRecords || INITIAL_STATE.leaveRecords,
+          staffList: Array.isArray(staffList) ? staffList : INITIAL_STATE.staffList,
+          leaveRecords: Array.isArray(leaveRecords) ? leaveRecords : INITIAL_STATE.leaveRecords,
           dailyOvertime: dailyOvertime || INITIAL_STATE.dailyOvertime,
           weeklyOvertime: weeklyOvertime || (INITIAL_STATE as any).weeklyOvertime || {},
           dailyAttendance: dailyAttendance || INITIAL_STATE.dailyAttendance,
           dailyExternalAudit: dailyExternalAudit || {},
           dailyCPA: dailyCPA || {},
           dailyGSI: dailyGSI || INITIAL_STATE.dailyGSI || {},
-          guestComplaints: guestComplaints || [],
-          affiliateHistory: affiliateHistory || [],
+          guestComplaints: Array.isArray(guestComplaints) ? guestComplaints : [],
+          affiliateHistory: Array.isArray(affiliateHistory) ? affiliateHistory : [],
           manpowerData: manpowerData || {},
-          customSuppliers: customSuppliers || getStoredCustomSuppliers()
+          customSuppliers: Array.isArray(customSuppliers) ? customSuppliers : getStoredCustomSuppliers()
         };
 
+        globalDataRef.current = hydratedGlobal;
         setGlobalDataState(hydratedGlobal);
         setOutletMonthlyData(rest || {});
 
@@ -1529,21 +1580,29 @@ const App: React.FC = () => {
         lastSyncedOutlet.current = nextOutletHashes;
         isHydrated.current = true;
       }
-    } catch (loginError) {
-      console.warn('[handleLogin] Notice during login data hydration:', loginError);
-    } finally {
-      if (isLoggingOutRef.current) return;
-      const photoURL = auth.currentUser?.photoURL || safeStorage.getItem('BARN_USER_PHOTO') || '';
-      const displayName = auth.currentUser?.displayName || safeStorage.getItem('BARN_USER_NAME') || '';
-      setUser({ email: cleanEmail, isLoggedIn: true, selectedOutlet: outletKey, photoURL, displayName });
-      setIsPublicView(false);
-      safeStorage.setItem('BARN_USER_SESSION', cleanEmail);
-      safeStorage.setItem('MANUAL_USER_EMAIL', cleanEmail);
-      safeStorage.setItem('BARN_SELECTED_OUTLET', outletKey);
+      } catch (loginError) {
+        console.warn('[handleLogin] Notice during login data hydration:', loginError);
+      } finally {
+        if (inFlightLoginRef.current?.key === sessionKey) {
+          inFlightLoginRef.current = null;
+        }
+        setIsRefreshing(false);
+        if (!isLoggingOutRef.current) {
+          activeSessionKeyRef.current = sessionKey;
+          const photoURL = auth.currentUser?.photoURL || safeStorage.getItem('BARN_USER_PHOTO') || '';
+          const displayName = auth.currentUser?.displayName || safeStorage.getItem('BARN_USER_NAME') || '';
+          setUser({ email: cleanEmail, isLoggedIn: true, selectedOutlet: outletKey, photoURL, displayName });
+          setIsPublicView(false);
+          safeStorage.setItem('BARN_USER_SESSION', cleanEmail);
+          safeStorage.setItem('MANUAL_USER_EMAIL', cleanEmail);
+          safeStorage.setItem('BARN_SELECTED_OUTLET', outletKey);
+          setSyncStatus('online');
+        }
+      }
+    })();
 
-      setSyncStatus('online');
-      setIsRefreshing(false);
-    }
+    inFlightLoginRef.current = { key: sessionKey, promise: loginPromise };
+    return loginPromise;
   };
 
   const forceSync = useCallback(async () => {
@@ -1888,12 +1947,16 @@ const App: React.FC = () => {
           });
 
           if (hasChange && nextGlobal.staffList) {
+            const rawStaff = Array.isArray(nextGlobal.staffList)
+              ? nextGlobal.staffList
+              : (typeof nextGlobal.staffList === 'object' ? Object.values(nextGlobal.staffList) : []);
             const seen = new Set();
-            nextGlobal.staffList = nextGlobal.staffList
+            nextGlobal.staffList = rawStaff
+              .filter((s: any) => s && typeof s === 'object')
               .sort(sortStaffList)
               .filter((s: any) => {
-                if (seen.has(s.id)) return false;
-                seen.add(s.id);
+                if (s.id && seen.has(s.id)) return false;
+                if (s.id) seen.add(s.id);
                 return true;
               });
           }
@@ -2343,9 +2406,11 @@ const App: React.FC = () => {
 
   const handleLogout = async () => {
     isLoggingOutRef.current = true;
+    activeSessionKeyRef.current = null;
+    inFlightLoginRef.current = null;
     const loggingOutEmail = user.email;
     const currentUid = auth.currentUser?.uid || '';
-    const tabSessionId = sessionStorage.getItem('SH_TAB_SESSION_ID') || '';
+    const tabSessionId = safeSessionStorage.getItem('SH_TAB_SESSION_ID') || '';
     const presenceKey = currentUid ? `${currentUid}_${tabSessionId}` : '';
 
     try {
@@ -2432,8 +2497,11 @@ const App: React.FC = () => {
   };
 
   const handleShare = () => {
-    // Shared App URL from runtime context
-    const sharedUrl = "https://ais-pre-hw575cvbfiwclx63dkmzec-57088962471.asia-east1.run.app";
+    const sharedUrl = (typeof window !== 'undefined' && window.location?.origin) ? window.location.origin : '';
+    if (!sharedUrl) {
+      showToast("Gagal menyalin URL. Silakan salin manual dari address bar.", "error");
+      return;
+    }
     safeClipboard.writeText(sharedUrl).then(success => {
       if (success) {
         showToast("URL Aplikasi telah disalin! Bagikan URL ini agar orang lain bisa mengakses tanpa perlu remix.", "success");
@@ -2445,14 +2513,21 @@ const App: React.FC = () => {
 
   const loadPublicData = async () => {
     setIsRefreshing(true);
-    let cloudData = await fetchUserData('public@dashboard.com', 'SH THE BARN');
+    try {
+      const cloudData = await fetchUserData('public@dashboard.com', 'SH THE BARN');
 
-    if (cloudData) {
-      const { staffList, ...rest } = cloudData;
-      if (staffList) setGlobalDataState(prev => ({ ...prev, staffList }));
-      setOutletMonthlyData(rest);
+      if (cloudData) {
+        const { staffList, ...rest } = cloudData;
+        if (Array.isArray(staffList)) {
+          setGlobalDataState(prev => ({ ...prev, staffList }));
+        }
+        setOutletMonthlyData(rest || {});
+      }
+    } catch (err) {
+      console.warn('[loadPublicData] Failed to load public data:', err);
+    } finally {
+      setIsRefreshing(false);
     }
-    setIsRefreshing(false);
   };
 
   useEffect(() => {
@@ -2468,21 +2543,35 @@ const App: React.FC = () => {
       return;
     }
 
+    let isMounted = true;
     setIsAllOutletsLoading(true);
-    fetchAllOutletsData().then(initialData => {
-      if (initialData && Object.keys(initialData).length > 0) {
-        setAllOutletsData(prev => ({ ...initialData, ...prev }));
-        setIsAllOutletsLoading(false);
-        setSyncStatus('online');
-      }
-    }).catch(console.error);
+    fetchAllOutletsData()
+      .then(initialData => {
+        if (!isMounted) return;
+        if (initialData && Object.keys(initialData).length > 0) {
+          setAllOutletsData(prev => ({ ...initialData, ...prev }));
+          setSyncStatus('online');
+        }
+      })
+      .catch(err => {
+        console.warn('[App] fetchAllOutletsData notice:', err);
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsAllOutletsLoading(false);
+        }
+      });
 
     const unsubscribe = startAllOutletsListener((results) => {
-      setAllOutletsData(results);
+      if (!isMounted) return;
+      setAllOutletsData(results || {});
       setIsAllOutletsLoading(false);
       setSyncStatus('online');
     });
-    return unsubscribe;
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
   }, [isAuthReady, user.isLoggedIn, isPublicView]);
 
   if (!isAuthReady) {
@@ -2510,7 +2599,8 @@ const App: React.FC = () => {
     );
   }
 
-  const filteredStaffList = currentData.staffList.filter(s => 
+  const filteredStaffList = (Array.isArray(currentData.staffList) ? currentData.staffList : []).filter(s => 
+    s &&
     (!user.selectedOutlet || user.selectedOutlet === 'ALL' || s.outlet === user.selectedOutlet) && 
     (s.status === 'ACTIVE' || !s.status)
   );

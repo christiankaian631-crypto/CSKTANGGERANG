@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { AppState, LedgerItem, CustomSupplier } from '../types';
 import { getOrderScheduleForOutlet } from '../constants';
+import { safeStorage, safeWindow } from '../lib/safeStorage';
 import ShareActions from './ShareActions';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -134,7 +135,7 @@ const ReceivingSheetModule: React.FC<Props> = ({
   const [localCustomSuppliers, setLocalCustomSuppliers] = useState<CustomSupplier[]>(() => {
     if (data?.customSuppliers && data.customSuppliers.length > 0) return data.customSuppliers;
     try {
-      const stored = typeof window !== 'undefined' ? localStorage.getItem('APP_CUSTOM_SUPPLIERS') : null;
+      const stored = safeStorage.getItem('APP_CUSTOM_SUPPLIERS');
       if (stored) return JSON.parse(stored);
     } catch (e) {}
     return [];
@@ -165,7 +166,7 @@ const ReceivingSheetModule: React.FC<Props> = ({
 
   const [deactivatedSuppliers, setDeactivatedSuppliers] = useState<string[]>(() => {
     try {
-      const stored = typeof window !== 'undefined' ? localStorage.getItem('APP_DEACTIVATED_SUPPLIERS') : null;
+      const stored = safeStorage.getItem('APP_DEACTIVATED_SUPPLIERS');
       if (stored) return JSON.parse(stored);
     } catch (e) {}
     return [];
@@ -227,12 +228,10 @@ const ReceivingSheetModule: React.FC<Props> = ({
     }
 
     try {
-      if (typeof window !== 'undefined') {
-        const existingRaw = localStorage.getItem('APP_CUSTOM_SUPPLIERS');
-        const existingList = existingRaw ? JSON.parse(existingRaw) : [];
-        existingList.push(newSup);
-        localStorage.setItem('APP_CUSTOM_SUPPLIERS', JSON.stringify(existingList));
-      }
+      const existingRaw = safeStorage.getItem('APP_CUSTOM_SUPPLIERS');
+      const existingList = existingRaw ? JSON.parse(existingRaw) : [];
+      existingList.push(newSup);
+      safeStorage.setItem('APP_CUSTOM_SUPPLIERS', JSON.stringify(existingList));
     } catch (e) {}
 
     showToast?.(`Supplier "${newSup.name}" berhasil ditambahkan! Kolom supplier baru otomatis muncul di Receiving Sheet.`, 'success');
@@ -251,12 +250,10 @@ const ReceivingSheetModule: React.FC<Props> = ({
       }));
     }
     try {
-      if (typeof window !== 'undefined') {
-        const existingRaw = localStorage.getItem('APP_CUSTOM_SUPPLIERS');
-        if (existingRaw) {
-          const list = JSON.parse(existingRaw).filter((s: any) => s.id !== supplierId);
-          localStorage.setItem('APP_CUSTOM_SUPPLIERS', JSON.stringify(list));
-        }
+      const existingRaw = safeStorage.getItem('APP_CUSTOM_SUPPLIERS');
+      if (existingRaw) {
+        const list = JSON.parse(existingRaw).filter((s: any) => s.id !== supplierId);
+        safeStorage.setItem('APP_CUSTOM_SUPPLIERS', JSON.stringify(list));
       }
     } catch (e) {}
     showToast?.(`Supplier "${supplierName}" berhasil dihapus.`, 'info');
@@ -753,14 +750,12 @@ const ReceivingSheetModule: React.FC<Props> = ({
     });
 
     try {
-      if (typeof window !== 'undefined') {
-        localStorage.setItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(calcPercent));
-        localStorage.setItem(`COGS_CLOSING_INV_${monthKey}`, String(inputEndingInv));
-        localStorage.setItem(`COGS_OPENING_INV_${monthKey}`, String(inputBeginInv));
-        localStorage.setItem(`COGS_RND_${monthKey}`, String(inputRnd));
-        localStorage.setItem(`COGS_WRONG_MAKER_${monthKey}`, String(inputWrongMaker));
-        localStorage.setItem(`COGS_MARKETING_KOL_${monthKey}`, String(inputMarketingKol));
-      }
+      safeStorage.setItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(calcPercent));
+      safeStorage.setItem(`COGS_CLOSING_INV_${monthKey}`, String(inputEndingInv));
+      safeStorage.setItem(`COGS_OPENING_INV_${monthKey}`, String(inputBeginInv));
+      safeStorage.setItem(`COGS_RND_${monthKey}`, String(inputRnd));
+      safeStorage.setItem(`COGS_WRONG_MAKER_${monthKey}`, String(inputWrongMaker));
+      safeStorage.setItem(`COGS_MARKETING_KOL_${monthKey}`, String(inputMarketingKol));
     } catch (e) {}
 
     showToast?.(`Data Inventory, R&D, Wrong Maker, & Marketing (KOL) berhasil disimpan! Persentase Closing Inventory COGS diperbarui menjadi ${calcPercent}%.`, "success");
@@ -1359,7 +1354,7 @@ const ReceivingSheetModule: React.FC<Props> = ({
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (window.confirm(`Hapus supplier kustom "${sup.label}"?`)) {
+                            if (safeWindow.confirm(`Hapus supplier kustom "${sup.label}"?`)) {
                               handleDeleteCustomSupplier(sup.id, sup.label);
                             }
                           }}
@@ -2641,7 +2636,7 @@ const ReceivingSheetModule: React.FC<Props> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            if (window.confirm(`Hapus supplier "${cs.label}"?`)) {
+                            if (safeWindow.confirm(`Hapus supplier "${cs.label}"?`)) {
                               handleDeleteCustomSupplier(cs.id, cs.label);
                             }
                           }}

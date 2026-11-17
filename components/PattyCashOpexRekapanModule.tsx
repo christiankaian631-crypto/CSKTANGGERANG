@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import { AppState } from '../types';
 import { MONTHS } from '../constants';
 import ShareActions from './ShareActions';
+import { safeStorage } from '../lib/safeStorage';
 
 interface Props {
   data: AppState;
@@ -56,12 +57,12 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
 
     if (currentMonthState.expenseCategoryBudgets) return currentMonthState.expenseCategoryBudgets;
 
-    const savedLocal = localStorage.getItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`);
+    const savedLocal = safeStorage.getItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`);
     if (savedLocal) {
       try { return JSON.parse(savedLocal); } catch (e) { /* ignore */ }
     }
 
-    const savedGlobal = localStorage.getItem('EXPENSE_CATEGORY_BUDGETS');
+    const savedGlobal = safeStorage.getItem('EXPENSE_CATEGORY_BUDGETS');
     if (savedGlobal) {
       try { return JSON.parse(savedGlobal); } catch (e) { /* ignore */ }
     }
@@ -105,8 +106,8 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
       onUpdate('expenseCategoryBudgets', updated);
     }
 
-    localStorage.setItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`, JSON.stringify(updated));
-    localStorage.setItem('EXPENSE_CATEGORY_BUDGETS', JSON.stringify(updated));
+    safeStorage.setItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`, JSON.stringify(updated));
+    safeStorage.setItem('EXPENSE_CATEGORY_BUDGETS', JSON.stringify(updated));
 
     setIsEditingBudgets(false);
     showToast?.(`Budget Kategori Expense untuk ${MONTHS[selectedMonth]} ${selectedYear} berhasil disimpan!`, 'success');
