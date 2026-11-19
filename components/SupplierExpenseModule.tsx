@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, LedgerItem, Outlet, CustomSupplier } from '../types';
-import { OUTLETS, INITIAL_STATE, getStoredCustomSuppliers, saveStoredCustomSuppliers } from '../constants';
+import { OUTLETS, INITIAL_STATE, getStoredCustomSuppliers, saveStoredCustomSuppliers, normalizeOutletKey } from '../constants';
 import { safeStorage, safeWindow } from '../lib/safeStorage';
 import ShareActions from './ShareActions';
 import ExcelJS from 'exceljs';
@@ -114,7 +114,7 @@ export const SupplierExpenseModule: React.FC<Props> = ({
 
   const defaultOutlet = isRegionalView 
     ? (propSelectedOutlet || 'ALL')
-    : (propSelectedOutlet || 'SH THE BARN');
+    : (propSelectedOutlet || (data as any)?.outlet || '');
 
   const [activeOutlet, setActiveOutlet] = useState<string>(defaultOutlet);
   const [moduleTab, setModuleTab] = useState<'INPUT' | 'ALOKASI_BUDGET' | 'MATRIX' | 'DAFTAR_SUPPLIER'>('INPUT');
@@ -125,7 +125,8 @@ export const SupplierExpenseModule: React.FC<Props> = ({
   const [selectedItemForDetail, setSelectedItemForDetail] = useState<MatrixSupplierItem | null>(null);
 
   // Budget Belanja Pengadaan (MK, MS, Cash Supplier, & 7 Rekanan Supplier)
-  const budgetStorageKey = `BARN_PROCUREMENT_BUDGET_${activeOutlet}_${selectedYear}_${selectedMonth}`;
+  const budgetOutletScope = normalizeOutletKey(activeOutlet) || 'ALL';
+  const budgetStorageKey = `BARN_PROCUREMENT_BUDGET_${budgetOutletScope}_${selectedYear}_${selectedMonth}`;
   const [customProcurementBudget, setCustomProcurementBudget] = useState<number>(() => {
     const saved = safeStorage.getItem(budgetStorageKey);
     return saved ? parseFloat(saved) || 0 : 0;

@@ -244,60 +244,92 @@ export const getAreaForOutlet = (outlet: string): string => {
 };
 
 /**
+ * Normalizes any outlet name or known alias into its canonical outlet identifier
+ * so aliases like "ALSUT" or "THE BARN" never create separate duplicate buckets.
+ */
+export const normalizeOutletKey = (outletName?: string | null): string => {
+  const raw = (outletName || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  if (!raw) return '';
+  if (raw === 'ALL' || raw === 'SEMUA OUTLET') return raw;
+
+  if (raw === 'SH ALSUT' || raw === 'ALSUT' || raw === 'ALAM SUTERA' || raw === 'SH ALAM SUTERA') {
+    return 'SH ALAM SUTERA';
+  }
+  if (raw === 'BARN' || raw === 'THE BARN' || raw === 'SH BARN' || raw === 'SH THE BARN') {
+    return 'SH THE BARN';
+  }
+  if (raw === 'LEBAK BULUS' || raw === 'SH LEBAK BULUS') {
+    return 'SH LEBAK BULUS';
+  }
+  if (raw === 'CIPETE' || raw === 'SH CIPETE') return 'SH CIPETE';
+  if (raw === 'KEMANG' || raw === 'SH KEMANG') return 'SH KEMANG';
+  if (raw === 'BINTARO' || raw === 'SH BINTARO') return 'SH BINTARO';
+  if (raw === 'BEKASI' || raw === 'SH BEKASI') return 'SH BEKASI';
+  if (raw === 'CIBUBUR' || raw === 'SH CIBUBUR') return 'SH CIBUBUR';
+
+  const activeNames = getActiveOutletNames();
+  const exactActive = activeNames.find(n => n.trim().toUpperCase() === raw);
+  if (exactActive) return exactActive.trim().toUpperCase();
+
+  const rawWithoutSH = raw.replace(/^SH\s+/, '').trim();
+  if (rawWithoutSH) {
+    const shMatch = activeNames.find(n => n.trim().toUpperCase().replace(/^SH\s+/, '').trim() === rawWithoutSH);
+    if (shMatch) return shMatch.trim().toUpperCase();
+  }
+
+  return raw;
+};
+
+/**
  * Robust outlet lookup helper that resolves outlet data by name,
  * supporting exact, trimmed, case-insensitive, with/without "SH " prefix,
- * and abbreviation aliases (e.g. ALSUT <-> ALAM SUTERA).
+ * and abbreviation aliases (e.g. ALSUT <-> ALAM SUTERA) without cross-outlet false positives.
  */
 export const findOutletData = (allOutletsData: Record<string, any> | undefined | null, outletName: string): any => {
   if (!allOutletsData || !outletName || typeof allOutletsData !== 'object') return {};
-  if (allOutletsData[outletName]) return allOutletsData[outletName];
+  const trimmedTarget = outletName.trim();
+  if (!trimmedTarget || trimmedTarget.toUpperCase() === 'ALL') return {};
 
-  const cleanTarget = outletName.trim().toUpperCase();
+  if (allOutletsData[outletName]) return allOutletsData[outletName];
+  if (allOutletsData[trimmedTarget]) return allOutletsData[trimmedTarget];
+
+  const cleanTarget = trimmedTarget.toUpperCase();
+  const canonicalTarget = normalizeOutletKey(cleanTarget);
+  if (canonicalTarget && allOutletsData[canonicalTarget]) {
+    return allOutletsData[canonicalTarget];
+  }
+
   const keys = Object.keys(allOutletsData);
 
-  // 1. Direct case-insensitive match
-  const directMatch = keys.find(k => k.trim().toUpperCase() === cleanTarget);
+  // 1. Direct case-insensitive or canonical match
+  const directMatch = keys.find(k => {
+    const ck = k.trim().toUpperCase();
+    return ck === cleanTarget || (canonicalTarget && normalizeOutletKey(ck) === canonicalTarget);
+  });
   if (directMatch) return allOutletsData[directMatch];
 
-  // 2. Match with / without "SH " prefix
+  // 2. Match with / without "SH " prefix (only when non-empty)
   const targetWithoutSH = cleanTarget.replace(/^SH\s+/, '').trim();
-  const targetWithSH = `SH ${targetWithoutSH}`;
+  const targetWithSH = targetWithoutSH ? `SH ${targetWithoutSH}` : '';
 
-  const prefixMatch = keys.find(k => {
-    const cleanK = k.trim().toUpperCase();
-    const kWithoutSH = cleanK.replace(/^SH\s+/, '').trim();
-    return cleanK === targetWithSH || kWithoutSH === targetWithoutSH;
-  });
-  if (prefixMatch) return allOutletsData[prefixMatch];
-
-  // 3. Known aliases
-  if (cleanTarget.includes('LEBAK') || cleanTarget.includes('BULUS')) {
-    const lbKey = keys.find(k => {
-      const c = k.toUpperCase();
-      return c.includes('LEBAK') || c.includes('BULUS');
+  if (targetWithoutSH.length > 0) {
+    const prefixMatch = keys.find(k => {
+      const cleanK = k.trim().toUpperCase();
+      const kWithoutSH = cleanK.replace(/^SH\s+/, '').trim();
+      return (targetWithSH && cleanK === targetWithSH) || (kWithoutSH.length > 0 && kWithoutSH === targetWithoutSH);
     });
-    if (lbKey) return allOutletsData[lbKey];
+    if (prefixMatch) return allOutletsData[prefixMatch];
   }
 
-  if (cleanTarget.includes('ALSUT') || cleanTarget.includes('ALAM SUTERA')) {
-    const alsutKey = keys.find(k => {
-      const c = k.toUpperCase();
-      return c.includes('ALSUT') || c.includes('ALAM SUTERA');
+  // 3. Fallback: safe contains key (guard against short or empty strings)
+  if (targetWithoutSH.length >= 4) {
+    const containsMatch = keys.find(k => {
+      const kWithoutSH = k.trim().toUpperCase().replace(/^SH\s+/, '').trim();
+      if (kWithoutSH.length < 4) return false;
+      return kWithoutSH.includes(targetWithoutSH) || targetWithoutSH.includes(kWithoutSH);
     });
-    if (alsutKey) return allOutletsData[alsutKey];
+    if (containsMatch) return allOutletsData[containsMatch];
   }
-
-  if (cleanTarget.includes('BARN')) {
-    const barnKey = keys.find(k => k.toUpperCase().includes('BARN'));
-    if (barnKey) return allOutletsData[barnKey];
-  }
-
-  // 4. Fallback: contains key
-  const containsMatch = keys.find(k => {
-    const c = k.trim().toUpperCase();
-    return c.includes(targetWithoutSH) || targetWithoutSH.includes(c.replace(/^SH\s+/, '').trim());
-  });
-  if (containsMatch) return allOutletsData[containsMatch];
 
   return {};
 };

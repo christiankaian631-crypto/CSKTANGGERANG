@@ -39,13 +39,56 @@ let outletsMemoryCache: Record<string, any> | null = null;
 let outletsVersion = Date.now();
 let outletsETag = `"${outletsVersion.toString(36)}"`;
 
+function normalizeServerOutletId(rawId: string): string {
+  const raw = (rawId || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  if (!raw) return '';
+  if (raw === 'SH ALSUT' || raw === 'ALSUT' || raw === 'ALAM SUTERA' || raw === 'SH ALAM SUTERA') return 'SH ALAM SUTERA';
+  if (raw === 'BARN' || raw === 'THE BARN' || raw === 'SH BARN' || raw === 'SH THE BARN') return 'SH THE BARN';
+  if (raw === 'CIPETE' || raw === 'SH CIPETE') return 'SH CIPETE';
+  if (raw === 'KEMANG' || raw === 'SH KEMANG') return 'SH KEMANG';
+  if (raw === 'LEBAK BULUS' || raw === 'SH LEBAK BULUS') return 'SH LEBAK BULUS';
+  if (raw === 'BINTARO' || raw === 'SH BINTARO') return 'SH BINTARO';
+  if (raw === 'BEKASI' || raw === 'SH BEKASI') return 'SH BEKASI';
+  if (raw === 'CIBUBUR' || raw === 'SH CIBUBUR') return 'SH CIBUBUR';
+
+  const rawWithoutSH = raw.replace(/^SH\s+/, '').trim();
+  const knownDefault = DEFAULT_SYNC_OUTLETS.find(o =>
+    o.name.toUpperCase() === raw ||
+    (rawWithoutSH && o.name.toUpperCase().replace(/^SH\s+/, '').trim() === rawWithoutSH)
+  );
+  if (knownDefault) return knownDefault.name;
+  return raw;
+}
+
+function canonicalizeOutletsMap(rawData: Record<string, any>): Record<string, any> {
+  const cleanMap: Record<string, any> = {};
+  if (!rawData || typeof rawData !== 'object') return cleanMap;
+
+  Object.entries(rawData).forEach(([key, val]) => {
+    if (!val || typeof val !== 'object') return;
+    const canonKey = normalizeServerOutletId(key);
+    if (!canonKey) return;
+
+    const existing = cleanMap[canonKey];
+    const existingTs = existing?.updatedAt ? Date.parse(existing.updatedAt) || 0 : 0;
+    const incomingTs = val?.updatedAt ? Date.parse(val.updatedAt) || 0 : 0;
+
+    if (!existing || incomingTs >= existingTs) {
+      cleanMap[canonKey] = JSON.parse(JSON.stringify(val));
+    }
+  });
+
+  return cleanMap;
+}
+
 function readOutletsData(): Record<string, any> {
   if (outletsMemoryCache) {
     return outletsMemoryCache;
   }
   try {
     if (fs.existsSync(OUTLETS_FILE)) {
-      outletsMemoryCache = JSON.parse(fs.readFileSync(OUTLETS_FILE, "utf-8"));
+      const parsed = JSON.parse(fs.readFileSync(OUTLETS_FILE, "utf-8"));
+      outletsMemoryCache = canonicalizeOutletsMap(parsed);
       return outletsMemoryCache!;
     }
   } catch (err) {
@@ -56,12 +99,13 @@ function readOutletsData(): Record<string, any> {
 }
 
 function writeOutletsData(data: Record<string, any>) {
-  outletsMemoryCache = data;
+  const canonicalData = canonicalizeOutletsMap(data);
+  outletsMemoryCache = canonicalData;
   outletsVersion = Date.now();
   outletsETag = `"${outletsVersion.toString(36)}"`;
   try {
     const tempFile = `${OUTLETS_FILE}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf-8");
+    fs.writeFileSync(tempFile, JSON.stringify(canonicalData, null, 2), "utf-8");
     fs.renameSync(tempFile, OUTLETS_FILE);
   } catch (err) {
     console.error("Failed writing outlets.json:", err);
@@ -453,7 +497,13 @@ async function startServer() {
       res.setHeader('ETag', outletsETag);
       res.setHeader('Cache-Control', 'public, max-age=5, stale-while-revalidate=15');
       const outlets = readOutletsData();
-      res.json({ success: true, outlets });
+      const activeOutlets: Record<string, any> = {};
+      Object.entries(outlets).forEach(([key, val]) => {
+        if (val && !val.isDeleted) {
+          activeOutlets[key] = val;
+        }
+      });
+      res.json({ success: true, outlets: activeOutlets });
     } catch (error) {
       console.error("Error reading all outlets:", error);
       res.status(500).json({ error: "Failed to read outlets" });
@@ -462,9 +512,10 @@ async function startServer() {
 
   app.get("/api/sync/outlet/:outletId", (req, res) => {
     try {
-      const { outletId } = req.params;
+      const canonicalId = normalizeServerOutletId(req.params.outletId);
       const outlets = readOutletsData();
-      const currentOutlet = outlets[outletId] || null;
+      const found = canonicalId ? outlets[canonicalId] : null;
+      const currentOutlet = (found && !found.isDeleted) ? JSON.parse(JSON.stringify(found)) : null;
       const outletTag = currentOutlet?.updatedAt ? `"${new Date(currentOutlet.updatedAt).getTime().toString(36)}"` : outletsETag;
 
       const clientETag = req.headers['if-none-match'];
@@ -483,10 +534,15 @@ async function startServer() {
 
   app.post("/api/sync/outlet/:outletId", (req, res) => {
     try {
-      const { outletId } = req.params;
+      const canonicalId = normalizeServerOutletId(req.params.outletId);
+      if (!canonicalId || canonicalId === 'ALL' || canonicalId === 'SEMUA OUTLET') {
+        return res.status(400).json({ error: "Invalid outletId" });
+      }
       const { data, email, extraGlobal } = req.body;
       const outlets = readOutletsData();
-      const existing = outlets[outletId] || { monthlyData: {} };
+      const existing = outlets[canonicalId]
+        ? JSON.parse(JSON.stringify(outlets[canonicalId]))
+        : { monthlyData: {} };
       const existingMonthly = { ...(existing.monthlyData || {}) };
 
       if (data && typeof data === 'object') {
@@ -496,6 +552,11 @@ async function startServer() {
           if (!isNaN(mNum) && mNum >= 0 && mNum <= 11 && mVal && typeof mVal === 'object') {
             // Strip any nested monthlyData or invalid keys
             const { monthlyData: _ignored, ...cleanMonth } = mVal as any;
+            if (Array.isArray(cleanMonth.staffList)) {
+              cleanMonth.staffList = cleanMonth.staffList.filter(
+                (s: any) => s && (!s.outlet || normalizeServerOutletId(s.outlet) === canonicalId)
+              );
+            }
             // DEEP MERGE with existing month so user edits and other divisions never clobber each other!
             existingMonthly[mKey] = mergeOutletMonth(existingMonthly[mKey], cleanMonth);
           }
@@ -521,7 +582,12 @@ async function startServer() {
         ];
         allowedGlobals.forEach(gKey => {
           if (extraGlobal[gKey] !== undefined) {
-            const incomingGVal = extraGlobal[gKey];
+            let incomingGVal = extraGlobal[gKey];
+            if (gKey === 'staffList' && Array.isArray(incomingGVal)) {
+              incomingGVal = incomingGVal.filter(
+                (s: any) => s && (!s.outlet || normalizeServerOutletId(s.outlet) === canonicalId)
+              );
+            }
             if (
               incomingGVal && typeof incomingGVal === 'object' && !Array.isArray(incomingGVal) &&
               existing[gKey] && typeof existing[gKey] === 'object' && !Array.isArray(existing[gKey])
@@ -561,7 +627,7 @@ async function startServer() {
         }
       });
 
-      // Consolidate & replicate manpowerData across all months
+      // Consolidate & replicate manpowerData across all months (scoped strictly to this outlet)
       if (existing.manpowerData && typeof existing.manpowerData === 'object') {
         Object.entries(existingMonthly).forEach(([mKey, mObj]: [string, any]) => {
           if (mObj && typeof mObj === 'object') {
@@ -576,29 +642,26 @@ async function startServer() {
         });
       }
 
+      existing.outlet = canonicalId;
       existing.monthlyData = existingMonthly;
       existing.isDeleted = false;
       existing.updatedAt = new Date().toISOString();
       existing.lastUpdatedBy = (email || 'outlet-sync').toLowerCase();
 
-      outlets[outletId] = existing;
-
-      // Sync alias without or with "SH "
-      const cleanOId = outletId.trim();
-      if (cleanOId.startsWith('SH ')) {
-        const noShKey = cleanOId.substring(3).trim();
-        outlets[noShKey] = existing;
-      } else {
-        const withShKey = `SH ${cleanOId}`;
-        outlets[withShKey] = existing;
-      }
+      // Clean up any legacy alias keys and store ONLY under the single canonical key
+      Object.keys(outlets).forEach(k => {
+        if (k !== canonicalId && normalizeServerOutletId(k) === canonicalId) {
+          delete outlets[k];
+        }
+      });
+      outlets[canonicalId] = existing;
 
       writeOutletsData(outlets);
 
       res.json({ 
         success: true, 
         updatedAt: existing.updatedAt,
-        outletId
+        outletId: canonicalId
       });
     } catch (error) {
       console.error(`Error saving outlet ${req.params.outletId}:`, error);

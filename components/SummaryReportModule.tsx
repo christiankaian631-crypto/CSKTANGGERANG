@@ -1,12 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, LedgerItem, Outlet } from '../types';
-import { OUTLETS, INITIAL_STATE, getAreaForOutlet, getActiveOutletNames, findOutletData, getOutletMonthData, extractAllGSIEntries } from '../constants';
+import { OUTLETS, INITIAL_STATE, getAreaForOutlet, getActiveOutletNames, findOutletData, getOutletMonthData, extractAllGSIEntries, normalizeOutletKey } from '../constants';
 import { motion, AnimatePresence } from 'motion/react';
 import ExcelJS from 'exceljs';
 import ShareActions from './ShareActions';
 import { RegionalSummaryReportRecapTable, OutletSummaryRecapItem, resolvePattyCashBudget } from './RegionalSummaryReportRecapTable';
 import { calculateReceivingSheetTotalBelanja } from '../lib/moduleAnalytics';
-import { safeStorage } from '../lib/safeStorage';
+import { safeStorage, getScopedStorageItem } from '../lib/safeStorage';
 
 interface Props {
   data: AppState;
@@ -46,7 +46,7 @@ export const SummaryReportModule: React.FC<Props> = ({
   // In outlet mode (isRegionalView=false), strictly lock to propSelectedOutlet (outlet logged in)
   const defaultOutlet = isRegionalView 
     ? (propSelectedOutlet || 'ALL')
-    : (propSelectedOutlet || 'SH THE BARN');
+    : (propSelectedOutlet || (data as any)?.outlet || '');
 
   const [activeOutlet, setActiveOutlet] = useState<string>(defaultOutlet);
 
@@ -228,8 +228,11 @@ export const SummaryReportModule: React.FC<Props> = ({
 
       // 3. COGS CALCULATION
       const savedCogs = state.monthlyCogsData?.[monthKey] || {};
-      const openingInventory = savedCogs.beginningInventory !== undefined ? savedCogs.beginningInventory : (parseFloat(safeStorage.getItem(`COGS_OPENING_INV_${monthKey}`) || '0') || 0);
-      const closingInventory = savedCogs.endingInventory !== undefined ? savedCogs.endingInventory : (parseFloat(safeStorage.getItem(`COGS_CLOSING_INV_${monthKey}`) || '0') || 0);
+      const outletScope = normalizeOutletKey(outletName);
+      const localOpeningInv = getScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, outletScope);
+      const localClosingInv = getScopedStorageItem(`COGS_CLOSING_INV_${monthKey}`, outletScope);
+      const openingInventory = savedCogs.beginningInventory !== undefined ? savedCogs.beginningInventory : (parseFloat(localOpeningInv || '0') || 0);
+      const closingInventory = savedCogs.endingInventory !== undefined ? savedCogs.endingInventory : (parseFloat(localClosingInv || '0') || 0);
       const targetCogsBudgetPercent = savedCogs.targetBudgetPercent || 43.0;
 
       // Effective COGS = Opening (+) + Belanja (+) - Closing (-)

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { AppState, LedgerItem, OvertimeEntry, Staff, Division } from '../types';
-import { getOrderScheduleForOutlet, ORDER_SCHEDULES_BY_AREA } from '../constants';
-import { safeStorage } from '../lib/safeStorage';
+import { getOrderScheduleForOutlet, ORDER_SCHEDULES_BY_AREA, normalizeOutletKey } from '../constants';
+import { safeStorage, getScopedStorageItem, setScopedStorageItem } from '../lib/safeStorage';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   ResponsiveContainer, 
@@ -42,6 +42,7 @@ const MONTH_NAMES = [
 const DIVISIONS_LIST: Division[] = ['SERVICE', 'KITCHEN', 'BAR', 'STORE KEEPER'];
 
 const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, showToast, selectedOutlet }) => {
+  const outletScope = normalizeOutletKey(selectedOutlet || data?.outlet);
   const selectedMonth = parseInt(filters.month);
   const selectedYear = parseInt(filters.year) || new Date().getFullYear();
   const monthPad = String(selectedMonth + 1).padStart(2, '0');
@@ -51,23 +52,23 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
   const [activeTab, setActiveTab] = useState<'opex' | 'overtime' | 'belanja' | 'energy' | 'floor' | 'weekly-pettycash'>('opex');
   const [weeklyMode, setWeeklyMode] = useState<'CUTOFF' | 'CALENDAR'>('CUTOFF');
 
-  // Interactive Contingency Budget Settings (stored locally in safeStorage)
+  // Interactive Contingency Budget Settings (stored locally scoped per outlet)
   const [belanjaLimit, setBelanjaLimit] = useState<number>(() => {
-    const saved = safeStorage.getItem('BELANJA_CONTINGENCY_LIMIT');
+    const saved = getScopedStorageItem('BELANJA_CONTINGENCY_LIMIT', outletScope);
     return saved ? parseInt(saved, 10) : 35000000; // Default Rp 35 Jt
   });
   const [isEditingBelanjaLimit, setIsEditingBelanjaLimit] = useState(false);
   const [tempBelanjaLimit, setTempBelanjaLimit] = useState(String(belanjaLimit));
 
   const [overtimeHourLimitPerWeek, setOvertimeHourLimitPerWeek] = useState<number>(() => {
-    const saved = safeStorage.getItem('OVERTIME_WEEKLY_LIMIT_CREW');
+    const saved = getScopedStorageItem('OVERTIME_WEEKLY_LIMIT_CREW', outletScope);
     return saved ? parseFloat(saved) : 12; // Default 12 hours/week
   });
   const [isEditingOvertimeHourLimit, setIsEditingOvertimeHourLimit] = useState(false);
   const [tempOvertimeHourLimit, setTempOvertimeHourLimit] = useState(String(overtimeHourLimitPerWeek));
 
   const [energyRatioTarget, setEnergyRatioTarget] = useState<number>(() => {
-    const saved = safeStorage.getItem('ENERGY_RATIO_TARGET');
+    const saved = getScopedStorageItem('ENERGY_RATIO_TARGET', outletScope);
     return saved ? parseFloat(saved) : 4.0; // Default 4.0% of revenue
   });
   const [isEditingEnergyRatioTarget, setIsEditingEnergyRatioTarget] = useState(false);
@@ -75,19 +76,19 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
 
   // --- NEW STATES FOR WEEKDAY/WEEKEND TARGET & BELANJA % COST ---
   const [weekdayTarget, setWeekdayTarget] = useState<number>(() => {
-    const saved = safeStorage.getItem('TARGET_REVENUE_WEEKDAY');
+    const saved = getScopedStorageItem('TARGET_REVENUE_WEEKDAY', outletScope);
     return saved ? parseInt(saved, 10) : 28000000; // Default Rp 28.000.000
   });
   const [weekendTarget, setWeekendTarget] = useState<number>(() => {
-    const saved = safeStorage.getItem('TARGET_REVENUE_WEEKEND');
+    const saved = getScopedStorageItem('TARGET_REVENUE_WEEKEND', outletScope);
     return saved ? parseInt(saved, 10) : 45000000; // Default Rp 45.000.000
   });
   const [belanjaCostPercent, setBelanjaCostPercent] = useState<number>(() => {
-    const saved = safeStorage.getItem('BELANJA_COST_PERCENT');
+    const saved = getScopedStorageItem('BELANJA_COST_PERCENT', outletScope);
     return saved ? parseInt(saved, 10) : 40; // Default 40%
   });
   const [overtimeBudgetPercent, setOvertimeBudgetPercent] = useState<number>(() => {
-    const saved = safeStorage.getItem('OVERTIME_BUDGET_PERCENT');
+    const saved = getScopedStorageItem('OVERTIME_BUDGET_PERCENT', outletScope);
     return saved ? parseFloat(saved) : 1.5; // Default 1.5%
   });
 
@@ -100,11 +101,39 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
   const [tempOvertimeBudgetPercent, setTempOvertimeBudgetPercent] = useState(String(overtimeBudgetPercent));
 
   const [floorRatioTarget, setFloorRatioTarget] = useState<number>(() => {
-    const saved = safeStorage.getItem('FLOOR_RATIO_TARGET');
+    const saved = getScopedStorageItem('FLOOR_RATIO_TARGET', outletScope);
     return saved ? parseFloat(saved) : 3.0; // Default 3.0% of revenue
   });
   const [isEditingFloorRatioTarget, setIsEditingFloorRatioTarget] = useState(false);
   const [tempFloorRatioTarget, setTempFloorRatioTarget] = useState(String(floorRatioTarget));
+
+  useEffect(() => {
+    const nextBelanja = parseInt(getScopedStorageItem('BELANJA_CONTINGENCY_LIMIT', outletScope) || '35000000', 10) || 35000000;
+    const nextOtHour = parseFloat(getScopedStorageItem('OVERTIME_WEEKLY_LIMIT_CREW', outletScope) || '12') || 12;
+    const nextEnergyRatio = parseFloat(getScopedStorageItem('ENERGY_RATIO_TARGET', outletScope) || '4.0') || 4.0;
+    const nextWeekday = parseInt(getScopedStorageItem('TARGET_REVENUE_WEEKDAY', outletScope) || '28000000', 10) || 28000000;
+    const nextWeekend = parseInt(getScopedStorageItem('TARGET_REVENUE_WEEKEND', outletScope) || '45000000', 10) || 45000000;
+    const nextBelanjaCost = parseInt(getScopedStorageItem('BELANJA_COST_PERCENT', outletScope) || '40', 10) || 40;
+    const nextOtBudgetPct = parseFloat(getScopedStorageItem('OVERTIME_BUDGET_PERCENT', outletScope) || '1.5') || 1.5;
+    const nextFloorRatio = parseFloat(getScopedStorageItem('FLOOR_RATIO_TARGET', outletScope) || '3.0') || 3.0;
+
+    setBelanjaLimit(nextBelanja);
+    setTempBelanjaLimit(String(nextBelanja));
+    setOvertimeHourLimitPerWeek(nextOtHour);
+    setTempOvertimeHourLimit(String(nextOtHour));
+    setEnergyRatioTarget(nextEnergyRatio);
+    setTempEnergyRatioTarget(String(nextEnergyRatio));
+    setWeekdayTarget(nextWeekday);
+    setTempWeekdayTarget(String(nextWeekday));
+    setWeekendTarget(nextWeekend);
+    setTempWeekendTarget(String(nextWeekend));
+    setBelanjaCostPercent(nextBelanjaCost);
+    setTempBelanjaCostPercent(String(nextBelanjaCost));
+    setOvertimeBudgetPercent(nextOtBudgetPct);
+    setTempOvertimeBudgetPercent(String(nextOtBudgetPct));
+    setFloorRatioTarget(nextFloorRatio);
+    setTempFloorRatioTarget(String(nextFloorRatio));
+  }, [outletScope]);
 
   const chemicalMatrixScrollRef = useRef<HTMLDivElement>(null);
   const scrollChemicalMatrix = (direction: 'LEFT' | 'RIGHT') => {
@@ -190,7 +219,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
       return;
     }
     setBelanjaLimit(val);
-    safeStorage.setItem('BELANJA_CONTINGENCY_LIMIT', String(val));
+    setScopedStorageItem('BELANJA_CONTINGENCY_LIMIT', String(val), outletScope);
     setIsEditingBelanjaLimit(false);
     showToast?.(`Limit Kontingensi Belanja berhasil diubah menjadi Rp ${val.toLocaleString('id-ID')}`, 'success');
   };
@@ -202,7 +231,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
       return;
     }
     setOvertimeHourLimitPerWeek(val);
-    safeStorage.setItem('OVERTIME_WEEKLY_LIMIT_CREW', String(val));
+    setScopedStorageItem('OVERTIME_WEEKLY_LIMIT_CREW', String(val), outletScope);
     setIsEditingOvertimeHourLimit(false);
     showToast?.(`Limit Jam Lembur Mingguan Crew diubah menjadi ${val} Jam/Minggu`, 'success');
   };
@@ -214,7 +243,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
       return;
     }
     setEnergyRatioTarget(val);
-    safeStorage.setItem('ENERGY_RATIO_TARGET', String(val));
+    setScopedStorageItem('ENERGY_RATIO_TARGET', String(val), outletScope);
     setIsEditingEnergyRatioTarget(false);
     showToast?.(`Target Rasio Energi Kontingensi berhasil diubah menjadi ${val}% dari MTD Revenue`, 'success');
   };
@@ -233,9 +262,9 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
     setWeekendTarget(wkend);
     setBelanjaCostPercent(costPct);
 
-    safeStorage.setItem('TARGET_REVENUE_WEEKDAY', String(wkday));
-    safeStorage.setItem('TARGET_REVENUE_WEEKEND', String(wkend));
-    safeStorage.setItem('BELANJA_COST_PERCENT', String(costPct));
+    setScopedStorageItem('TARGET_REVENUE_WEEKDAY', String(wkday), outletScope);
+    setScopedStorageItem('TARGET_REVENUE_WEEKEND', String(wkend), outletScope);
+    setScopedStorageItem('BELANJA_COST_PERCENT', String(costPct), outletScope);
 
     setIsEditingBelanjaTargets(false);
     showToast?.('Konfigurasi Target Revenue & Cost Belanja berhasil disimpan!', 'success');
@@ -248,7 +277,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
       return;
     }
     setOvertimeBudgetPercent(val);
-    safeStorage.setItem('OVERTIME_BUDGET_PERCENT', String(val));
+    setScopedStorageItem('OVERTIME_BUDGET_PERCENT', String(val), outletScope);
     setIsEditingOvertimeBudgetPercent(false);
     showToast?.(`Target Rasio Overtime Kontingensi berhasil diubah menjadi ${val}% dari MTD Revenue`, 'success');
   };
@@ -260,7 +289,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
       return;
     }
     setFloorRatioTarget(val);
-    safeStorage.setItem('FLOOR_RATIO_TARGET', String(val));
+    setScopedStorageItem('FLOOR_RATIO_TARGET', String(val), outletScope);
     setIsEditingFloorRatioTarget(false);
     showToast?.(`Target Rasio Floor Order berhasil diubah menjadi ${val}% dari MTD Revenue`, 'success');
   };
@@ -272,14 +301,9 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
 
     if (data.expenseCategoryBudgets) return data.expenseCategoryBudgets;
 
-    const savedLocal = safeStorage.getItem(`EXPENSE_CATEGORY_BUDGETS_${monthPrefix}`);
+    const savedLocal = getScopedStorageItem(`EXPENSE_CATEGORY_BUDGETS_${monthPrefix}`, outletScope);
     if (savedLocal) {
       try { return JSON.parse(savedLocal); } catch (e) { /* ignore */ }
-    }
-
-    const savedGlobal = safeStorage.getItem('EXPENSE_CATEGORY_BUDGETS');
-    if (savedGlobal) {
-      try { return JSON.parse(savedGlobal); } catch (e) { /* ignore */ }
     }
 
     return {
@@ -290,7 +314,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
       atk: 0,
       asset: 0,
     };
-  }, [data.monthlyExpenseCategoryBudgets, data.expenseCategoryBudgets, monthPrefix]);
+  }, [data.monthlyExpenseCategoryBudgets, data.expenseCategoryBudgets, monthPrefix, outletScope]);
 
   const [isEditingCategoryBudgets, setIsEditingCategoryBudgets] = useState(false);
   const [tempCategoryBudgets, setTempCategoryBudgets] = useState({
@@ -333,8 +357,7 @@ const OutletPerformanceModule: React.FC<Props> = ({ data, onUpdate, filters, sho
     onUpdate('monthlyExpenseCategoryBudgets', newMonthlyMap);
     onUpdate('expenseCategoryBudgets', updated);
 
-    safeStorage.setItem(`EXPENSE_CATEGORY_BUDGETS_${monthPrefix}`, JSON.stringify(updated));
-    safeStorage.setItem('EXPENSE_CATEGORY_BUDGETS', JSON.stringify(updated));
+    setScopedStorageItem(`EXPENSE_CATEGORY_BUDGETS_${monthPrefix}`, JSON.stringify(updated), outletScope);
 
     setIsEditingCategoryBudgets(false);
     showToast?.(`Budget Kategori Expense untuk periode ${MONTH_NAMES[selectedMonth]} ${selectedYear} berhasil disimpan!`, 'success');

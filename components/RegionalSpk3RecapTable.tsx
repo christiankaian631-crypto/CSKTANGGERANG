@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Spk3Category, Spk3Record } from '../types';
-import { getActiveOutletNames, getAreaForOutlet } from '../constants';
+import { getActiveOutletNames, getAreaForOutlet, findOutletData, normalizeOutletKey } from '../constants';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 
@@ -84,10 +84,8 @@ export const RegionalSpk3RecapTable: React.FC<Props> = ({
     const seenIds = new Set<string>();
 
     activeOutletList.forEach(outletName => {
-      const matchedKey = Object.keys(sourceData).find(
-        k => k.trim().toUpperCase() === outletName.trim().toUpperCase()
-      ) || outletName;
-      const outletRaw = sourceData?.[matchedKey] || {};
+      const canonOutlet = normalizeOutletKey(outletName);
+      const outletRaw = findOutletData(sourceData, outletName) || {};
       const candidateStates: any[] = [];
 
       if (outletRaw[String(selectedMonth)]) candidateStates.push(outletRaw[String(selectedMonth)]);
@@ -111,7 +109,8 @@ export const RegionalSpk3RecapTable: React.FC<Props> = ({
               dayList.forEach((rec: any) => {
                 if (rec && rec.id) {
                   const recDate = String(rec.date || dKey || '');
-                  if (recDate.startsWith(monthKey) && !seenIds.has(rec.id)) {
+                  const belongsToOutlet = !rec.outlet || normalizeOutletKey(rec.outlet) === canonOutlet;
+                  if (belongsToOutlet && recDate.startsWith(monthKey) && !seenIds.has(rec.id)) {
                     seenIds.add(rec.id);
                     records.push({ ...rec, date: recDate, outlet: rec.outlet || outletName });
                   }
@@ -124,7 +123,8 @@ export const RegionalSpk3RecapTable: React.FC<Props> = ({
           st.spk3Records.forEach((rec: any) => {
             if (rec && rec.id) {
               const recDate = String(rec.date || '');
-              if (recDate.startsWith(monthKey) && !seenIds.has(rec.id)) {
+              const belongsToOutlet = !rec.outlet || normalizeOutletKey(rec.outlet) === canonOutlet;
+              if (belongsToOutlet && recDate.startsWith(monthKey) && !seenIds.has(rec.id)) {
                 seenIds.add(rec.id);
                 records.push({ ...rec, date: recDate, outlet: rec.outlet || outletName });
               }

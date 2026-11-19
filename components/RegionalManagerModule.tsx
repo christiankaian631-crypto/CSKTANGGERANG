@@ -37,7 +37,7 @@ import RegionalOperationalIssueRecapTable from './RegionalOperationalIssueRecapT
 import RegionalSpk3RecapTable from './RegionalSpk3RecapTable';
 import RegionalOutletReviewTable from './RegionalOutletReviewTable';
 import { buildAggregatedGlobalData } from '../lib/aggregators';
-import { OUTLETS, REGIONAL_AREAS, getAreaForOutlet, QA_PASSING_SCORES, OT_RATE, INITIAL_STATE, ORDER_SCHEDULES_BY_AREA, getOrderScheduleForOutlet, getStoredOtBudgetSettings, getActiveOutletNames, getActiveRegionalAreas, getActiveOutletConfigs } from '../constants';
+import { OUTLETS, REGIONAL_AREAS, getAreaForOutlet, QA_PASSING_SCORES, OT_RATE, INITIAL_STATE, ORDER_SCHEDULES_BY_AREA, getOrderScheduleForOutlet, getStoredOtBudgetSettings, getActiveOutletNames, getActiveRegionalAreas, getActiveOutletConfigs, findOutletData, normalizeOutletKey } from '../constants';
 import RegionalWaReportModal from './RegionalWaReportModal';
 import { WaReportScope, WaReportPeriod, generateRegionalWaReport } from '../lib/regionalWaReport';
 import { motion, AnimatePresence } from 'motion/react';
@@ -98,10 +98,11 @@ const RevenueTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear, isP
   const [revenueSubTab, setRevenueSubTab] = useState<'MATRIX' | 'SUMMARY' | 'ALL'>('MATRIX');
 
   const displayedOutlets = useMemo(() => {
-    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !data?.[o]?.isDeleted);
+    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !findOutletData(data, o)?.isDeleted);
     const activeAreas = getActiveRegionalAreas(activeNames);
     if (selectedOutlet && selectedOutlet !== 'ALL') {
-      return activeNames.filter(o => o === selectedOutlet);
+      const canonSelected = normalizeOutletKey(selectedOutlet);
+      return activeNames.filter(o => normalizeOutletKey(o) === canonSelected);
     }
     if (selectedArea && selectedArea !== 'ALL' && activeAreas[selectedArea]) {
       return activeAreas[selectedArea];
@@ -110,7 +111,7 @@ const RevenueTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear, isP
   }, [selectedOutlet, selectedArea, data]);
 
   const areaGroups = useMemo(() => {
-    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !data?.[o]?.isDeleted);
+    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !findOutletData(data, o)?.isDeleted);
     const activeAreas = getActiveRegionalAreas(activeNames);
     const areas = ['JAKARTA', 'TANGGERANG', 'BEKASI & CIBUBUR'];
     if (selectedOutlet && selectedOutlet !== 'ALL') {
@@ -134,7 +135,7 @@ const RevenueTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear, isP
     const lastMonthStr = `${lastMonthDate.getFullYear()}-${String(lastMonthDate.getMonth() + 1).padStart(2, '0')}`;
 
     displayedOutlets.forEach(outlet => {
-      const outletMonths = (data && (data as any)[outlet]) || {};
+      const outletMonths = findOutletData(data, outlet) || {};
       const currentMonth = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || outletMonths.monthlyData?.[String(selectedMonth)] || {};
       const sales = currentMonth.sales || outletMonths.sales || currentMonth || { dailyRecording: {} };
       const dailyRec = sales.dailyRecording || currentMonth.dailyRecording || outletMonths.dailyRecording || {};
@@ -162,7 +163,7 @@ const RevenueTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear, isP
       const lmVariance = mtdRevenue - lastMonthRevenue;
 
       // Staff Count
-      const staffList = (data && (data as any)[outlet])?.staffList || [];
+      const staffList = outletMonths.staffList || [];
       const noOfEmployee = Array.isArray(staffList) ? staffList.filter((s: any) => s && (s.status === 'ACTIVE' || !s.status)).length : 0;
 
       stats[outlet] = {
@@ -175,10 +176,9 @@ const RevenueTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear, isP
         lastMonthRevenue,
         lmVariance,
         lmVariancePercent: lastMonthRevenue > 0 ? (lmVariance / lastMonthRevenue) * 100 : 0,
-        lastUpdated: (data && (data as any)[outlet])?._lastUpdated,
+        lastUpdated: outletMonths._lastUpdated,
         googleReview: getGoogleRatingAtMonth(data, outlet, selectedMonth, selectedYear),
         qaScore: (() => {
-          const outletMonths = (data && (data as any)[outlet]) || {};
           const mData = outletMonths[String(selectedMonth)] || {};
           const dailyQA = mData.dailyQA || {};
           let total = 0, count = 0;
@@ -2316,10 +2316,11 @@ const ConsolidatedLedgerTab: React.FC<TabProps & { type: 'SATISFACTION' | 'CITY_
 
 const OvertimeMTDTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear, globalData, isPreviewMode, showToast, selectedOutlet, selectedArea }) => {
   const displayedOutlets = useMemo(() => {
-    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !(data as any)?.[o]?.isDeleted);
+    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !findOutletData(data, o)?.isDeleted);
     const activeAreas = getActiveRegionalAreas(activeNames);
     if (selectedOutlet && selectedOutlet !== 'ALL') {
-      return activeNames.filter(o => o === selectedOutlet);
+      const canonSelected = normalizeOutletKey(selectedOutlet);
+      return activeNames.filter(o => normalizeOutletKey(o) === canonSelected);
     }
     if (selectedArea && selectedArea !== 'ALL' && activeAreas[selectedArea]) {
       return activeAreas[selectedArea];
@@ -2328,7 +2329,7 @@ const OvertimeMTDTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear,
   }, [selectedOutlet, selectedArea, data]);
 
   const areaGroups = useMemo(() => {
-    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !(data as any)?.[o]?.isDeleted);
+    const activeNames = Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !findOutletData(data, o)?.isDeleted);
     const activeAreas = getActiveRegionalAreas(activeNames);
     const areas = ['JAKARTA', 'TANGGERANG', 'BEKASI & CIBUBUR'];
     if (selectedOutlet && selectedOutlet !== 'ALL') {
@@ -2373,10 +2374,11 @@ const OvertimeMTDTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear,
     staffList.forEach(s => s && staffDivMap.set(s.staffId, s.division));
 
     return displayedOutlets.map((outlet, idx) => {
+      const canonOutlet = normalizeOutletKey(outlet);
       // Staff Count - Home Outlet Context
       const assignedStaff = staffList.filter(s => 
         s &&
-        s.outlet === outlet && 
+        (!s.outlet || normalizeOutletKey(s.outlet) === canonOutlet) && 
         (s.status === 'ACTIVE' || !s.status) &&
         s.division === 'SERVICE'
       );
@@ -2396,7 +2398,7 @@ const OvertimeMTDTab: React.FC<TabProps> = ({ data, selectedMonth, selectedYear,
           (otEntries as any[]).forEach(e => {
             // Key Fix: Attribute overtime to the OUTLET where it was worked
             // Filter by the division of the staff member (regardless of home outlet)
-            if (e.outlet === outlet && staffDivMap.get(e.staffId) === 'SERVICE') {
+            if (e && (!e.outlet || normalizeOutletKey(e.outlet) === canonOutlet) && staffDivMap.get(e.staffId) === 'SERVICE') {
               const status = dailyStatus[e.staffId];
               // Only count if they were present (HADIR/PH) on that day
               if (status === 'HADIR' || status === 'PH') {
@@ -2686,6 +2688,7 @@ interface RMProps {
   onUpdate?: (key: keyof AppState, value: any) => void;
   moduleType?: string;
   selectedOutlet?: string;
+  activeUserOutlet?: string;
 }
 
 const RegionalManagerModule: React.FC<RMProps> = ({ 
@@ -2700,7 +2703,8 @@ const RegionalManagerModule: React.FC<RMProps> = ({
   onRefresh,
   showToast,
   onUpdate,
-  selectedOutlet: initialSelectedOutlet
+  selectedOutlet: initialSelectedOutlet,
+  activeUserOutlet
 }) => {
   const safeSelectedMonth = (rawSelectedMonth !== undefined && rawSelectedMonth !== null && !isNaN(Number(rawSelectedMonth))) 
     ? Math.max(0, Math.min(11, Number(rawSelectedMonth))) 
@@ -2743,7 +2747,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
     const activeNames = getActiveOutletNames(activeOutletConfigs);
     const set = new Set<string>();
     activeNames.forEach(name => {
-      const d = allOutletsData?.[name];
+      const d = findOutletData(allOutletsData, name);
       if (!d || !d.isDeleted) {
         set.add(name);
       }
@@ -2762,7 +2766,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
   }, [availableOutlets]);
 
   useEffect(() => {
-    if (selectedOutlet && !availableOutlets.includes(selectedOutlet)) {
+    if (selectedOutlet && !availableOutlets.some(o => normalizeOutletKey(o) === normalizeOutletKey(selectedOutlet))) {
       setSelectedOutlet('');
     }
   }, [availableOutlets, selectedOutlet]);
@@ -2771,48 +2775,65 @@ const RegionalManagerModule: React.FC<RMProps> = ({
 
   const activeData = useMemo(() => {
     if (selectedOutlet && selectedOutlet !== 'ALL') {
-      const outletData = allOutletsData[selectedOutlet] || {};
+      const canonSelected = normalizeOutletKey(selectedOutlet);
+      const outletData = findOutletData(allOutletsData, selectedOutlet) || {};
       const monthData = outletData[String(selectedMonth)] || outletData[selectedMonth] || {};
+      const isCurrentSessionOutlet = Boolean(
+        globalData &&
+        (globalData as any).outlet &&
+        normalizeOutletKey((globalData as any).outlet) === canonSelected
+      );
       
-      const outletStaffList = (outletData.staffList && outletData.staffList.length > 0)
+      const rawOutletStaffList = (outletData.staffList && outletData.staffList.length > 0)
         ? outletData.staffList
         : (monthData.staffList && monthData.staffList.length > 0)
         ? monthData.staffList
-        : (aggregatedGlobalData.staffList || []).filter((s: any) => s && s.outlet === selectedOutlet);
+        : (isCurrentSessionOutlet ? (globalData.staffList || []) : []);
+      const outletStaffList = (rawOutletStaffList || []).filter(
+        (s: any) => s && (!s.outlet || normalizeOutletKey(s.outlet) === canonSelected)
+      );
       
-      const activeStaffIds = new Set(outletStaffList.map((s: any) => s.staffId));
+      const activeStaffIds = new Set(outletStaffList.map((s: any) => s?.staffId || s?.id).filter(Boolean));
       
-      const outletLeaveRecords = (outletData.leaveRecords && outletData.leaveRecords.length > 0)
+      const rawLeaveRecords = (outletData.leaveRecords && outletData.leaveRecords.length > 0)
         ? outletData.leaveRecords
         : (monthData.leaveRecords && monthData.leaveRecords.length > 0)
         ? monthData.leaveRecords
-        : (aggregatedGlobalData.leaveRecords || []).filter((r: any) => r && (r.outlet === selectedOutlet || activeStaffIds.has(r.staffId)));
+        : (isCurrentSessionOutlet ? (globalData.leaveRecords || []) : []);
+      const outletLeaveRecords = (rawLeaveRecords || []).filter(
+        (r: any) => r && (!r.outlet ? activeStaffIds.has(r.staffId) : normalizeOutletKey(r.outlet) === canonSelected)
+      );
 
       const outletAttendance: Record<string, any[]> = {};
-      const sourceAttendance = monthData.dailyAttendance || outletData.dailyAttendance || aggregatedGlobalData.dailyAttendance || {};
+      const sourceAttendance = monthData.dailyAttendance || outletData.dailyAttendance || (isCurrentSessionOutlet ? globalData.dailyAttendance : {}) || {};
       Object.entries(sourceAttendance).forEach(([d, arr]: [string, any]) => {
         if (Array.isArray(arr)) {
-          const filtered = arr.filter((a: any) => a && (a.outlet === selectedOutlet || activeStaffIds.has(a.staffId)));
+          const filtered = arr.filter(
+            (a: any) => a && (!a.outlet ? (!activeStaffIds.size || activeStaffIds.has(a.staffId)) : normalizeOutletKey(a.outlet) === canonSelected)
+          );
           if (filtered.length > 0) outletAttendance[d] = filtered;
         }
       });
 
       const outletOvertime: Record<string, any[]> = {};
-      const sourceOvertime = monthData.dailyOvertime || outletData.dailyOvertime || aggregatedGlobalData.dailyOvertime || {};
+      const sourceOvertime = monthData.dailyOvertime || outletData.dailyOvertime || (isCurrentSessionOutlet ? globalData.dailyOvertime : {}) || {};
       Object.entries(sourceOvertime).forEach(([d, arr]: [string, any]) => {
         if (Array.isArray(arr)) {
-          const filtered = arr.filter((o: any) => o && (o.outlet === selectedOutlet || activeStaffIds.has(o.staffId)));
+          const filtered = arr.filter(
+            (o: any) => o && (!o.outlet ? (!activeStaffIds.size || activeStaffIds.has(o.staffId)) : normalizeOutletKey(o.outlet) === canonSelected)
+          );
           if (filtered.length > 0) outletOvertime[d] = filtered;
         }
       });
 
-      const outletComplaints = (monthData.guestComplaints && monthData.guestComplaints.length > 0)
+      const rawComplaints = (monthData.guestComplaints && monthData.guestComplaints.length > 0)
         ? monthData.guestComplaints
         : (outletData.guestComplaints && outletData.guestComplaints.length > 0)
         ? outletData.guestComplaints
-        : (aggregatedGlobalData.guestComplaints || []).filter((c: any) => c && c.outlet === selectedOutlet);
-
-      const isCurrentSessionOutlet = globalData && (globalData as any).outlet === selectedOutlet;
+        : (isCurrentSessionOutlet ? (globalData.guestComplaints || []) : []);
+      const outletComplaints = (rawComplaints || []).filter(
+        (c: any) => c && (!c.outlet || normalizeOutletKey(c.outlet) === canonSelected)
+      );
 
       const salesData = monthData.sales || outletData.sales || (isCurrentSessionOutlet ? globalData.sales : INITIAL_STATE.sales);
 
@@ -2833,6 +2854,15 @@ const RegionalManagerModule: React.FC<RMProps> = ({
     return aggregatedGlobalData;
   }, [selectedOutlet, allOutletsData, aggregatedGlobalData, selectedMonth, globalData]);
 
+  const canMutateSelectedOutletInRegional = Boolean(
+    onUpdate &&
+    selectedOutlet &&
+    selectedOutlet !== 'ALL' &&
+    activeUserOutlet &&
+    normalizeOutletKey(selectedOutlet) === normalizeOutletKey(activeUserOutlet)
+  );
+  const safeRegionalOnUpdate = canMutateSelectedOutletInRegional ? onUpdate : undefined;
+
   const tabProps = { 
     data: allOutletsData, 
     selectedOutlet, 
@@ -2842,7 +2872,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
     selectedYear, 
     globalData: activeData, 
     isPreviewMode, 
-    onUpdate 
+    onUpdate: safeRegionalOnUpdate
   };
 
   // WhatsApp Report State & Helpers
@@ -3374,7 +3404,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
               {activeTab === 'WEEKLY_OVERTIME' && (
                 <RegionalWeeklyOvertimeRecapTable
                   allOutletsData={allOutletsData}
-                  globalData={activeData || globalData}
+                  globalData={activeData}
                   selectedMonth={selectedMonth}
                   selectedYear={selectedYear}
                   selectedArea={selectedArea}
@@ -3386,7 +3416,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
               {activeTab === 'MANPOWER_REGIONAL' && (
                 <RegionalManpowerRecapTable
                   allOutletsData={allOutletsData}
-                  globalData={activeData || globalData}
+                  globalData={activeData}
                   selectedMonth={selectedMonth}
                   selectedYear={selectedYear}
                   selectedArea={selectedArea}
@@ -3398,7 +3428,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
               {activeTab === 'QA_REPORT_REGIONAL' && (
                 <RegionalQARecapTable
                   allOutletsData={allOutletsData}
-                  globalData={activeData || globalData}
+                  globalData={activeData}
                   selectedMonth={selectedMonth}
                   selectedYear={selectedYear}
                   selectedArea={selectedArea}
@@ -3422,7 +3452,7 @@ const RegionalManagerModule: React.FC<RMProps> = ({
               {activeTab === 'RECEIVING_SHEET' && (
                 <ReceivingSheetModule 
                   data={activeData} 
-                  onUpdate={onUpdate} 
+                  onUpdate={safeRegionalOnUpdate} 
                   showToast={showToast} 
                   selectedOutlet={selectedOutlet || 'ALL'}
                   allMonthlyData={allOutletsData}
@@ -3432,7 +3462,8 @@ const RegionalManagerModule: React.FC<RMProps> = ({
               {activeTab === 'OUTLET_PERFORMANCE' && (
                 <OutletPerformanceModule 
                   data={activeData} 
-                  onUpdate={(k, v) => onUpdate && onUpdate(k, v)}
+                  selectedOutlet={selectedOutlet}
+                  onUpdate={(k, v) => safeRegionalOnUpdate && safeRegionalOnUpdate(k, v)}
                   filters={{ month: String(selectedMonth), year: String(selectedYear), startDate: `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`, endDate: `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-28` }}
                   showToast={showToast}
                 />
@@ -3440,10 +3471,10 @@ const RegionalManagerModule: React.FC<RMProps> = ({
               {activeTab === 'REKAPAN_PATTY_CASH' && (
                 <PattyCashOpexRekapanModule 
                   data={activeData} 
-                  allMonthlyData={selectedOutlet && allOutletsData[selectedOutlet] ? allOutletsData[selectedOutlet] : allOutletsData}
+                  allMonthlyData={selectedOutlet ? (findOutletData(allOutletsData, selectedOutlet) || allOutletsData) : allOutletsData}
                   filters={{ month: String(selectedMonth), year: String(selectedYear), outlet: selectedOutlet || 'ALL' }}
                   selectedOutlet={selectedOutlet || 'ALL'}
-                  onUpdate={onUpdate}
+                  onUpdate={safeRegionalOnUpdate}
                   showToast={showToast}
                 />
               )}
@@ -3454,24 +3485,20 @@ const RegionalManagerModule: React.FC<RMProps> = ({
                   filters={{ month: String(selectedMonth), year: String(selectedYear), outlet: selectedOutlet || 'ALL', startDate: `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`, endDate: `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-28` }}
                   selectedOutlet={selectedOutlet || 'ALL'}
                   isRegionalView={true}
-                  onUpdate={(updater) => {
-                    if (onUpdate) {
-                      const updated = typeof updater === 'function' ? (updater as any)(activeData) : updater;
-                      if (updated.dailyThirdPartyLedger) onUpdate('dailyThirdPartyLedger', updated.dailyThirdPartyLedger);
-                      if (updated.dailyGasLedger) onUpdate('dailyGasLedger', updated.dailyGasLedger);
-                    }
-                  }}
+                  onUpdate={safeRegionalOnUpdate ? ((updater) => {
+                    const updated = typeof updater === 'function' ? (updater as any)(activeData) : updater;
+                    if (updated.dailyThirdPartyLedger) safeRegionalOnUpdate('dailyThirdPartyLedger', updated.dailyThirdPartyLedger);
+                    if (updated.dailyGasLedger) safeRegionalOnUpdate('dailyGasLedger', updated.dailyGasLedger);
+                  }) : undefined}
                   showToast={showToast}
                 />
               )}
               {activeTab === 'REKAPAN_LOGISTIK' && (
                 <LogisticsModule 
                   data={activeData} 
-                  onUpdate={(updates) => {
-                    if (onUpdate) {
-                      Object.entries(updates).forEach(([k, v]) => onUpdate(k as keyof AppState, v));
-                    }
-                  }} 
+                  onUpdate={safeRegionalOnUpdate ? ((updates) => {
+                    Object.entries(updates).forEach(([k, v]) => safeRegionalOnUpdate(k as keyof AppState, v));
+                  }) : undefined} 
                   selectedDate={`${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`}
                   selectedOutlet={selectedOutlet}
                   showToast={showToast || (() => {})}
@@ -3605,12 +3632,10 @@ const RegionalManagerModule: React.FC<RMProps> = ({
                   filters={{ month: String(selectedMonth), year: String(selectedYear) }}
                   showToast={showToast}
                   isRegionalView={true}
-                  onUpdate={(updater) => {
-                    if (onUpdate) {
-                      const updated = updater(activeData);
-                      onUpdate('energyCost' as any, updated.energyCost);
-                    }
-                  }}
+                  onUpdate={safeRegionalOnUpdate ? ((updater) => {
+                    const updated = updater(activeData);
+                    safeRegionalOnUpdate('energyCost' as any, updated.energyCost);
+                  }) : undefined}
                 />
               )}
               {activeTab === 'VOID_BILL_REGIONAL' && (

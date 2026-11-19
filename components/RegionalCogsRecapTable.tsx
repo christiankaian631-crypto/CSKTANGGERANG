@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { getAreaForOutlet, getActiveOutletNames } from '../constants';
+import { getAreaForOutlet, getActiveOutletNames, findOutletData } from '../constants';
 import { AppState } from '../types';
 
 interface Props {
@@ -114,7 +114,7 @@ export const RegionalCogsRecapTable: React.FC<Props> = ({
     const fromData = Object.keys(allOutletsData || {});
     const combined = Array.from(new Set([...fromConfig, ...fromData]));
     return combined.filter(name => {
-      const d = allOutletsData?.[name];
+      const d = findOutletData(allOutletsData, name);
       return !d || !d.isDeleted;
     });
   }, [allOutletsData]);
@@ -122,7 +122,7 @@ export const RegionalCogsRecapTable: React.FC<Props> = ({
   // Compute 12 metrics per outlet
   const outletsDataList: OutletCogsRowData[] = useMemo(() => {
     return activeOutletsList.map(outletName => {
-      const outletDoc = (allOutletsData && allOutletsData[outletName]) || {};
+      const outletDoc = findOutletData(allOutletsData, outletName) || {};
       const monthDoc = outletDoc[String(selectedMonth)] || outletDoc[selectedMonth] || outletDoc.monthlyData?.[String(selectedMonth)] || {};
       const cogsData = monthDoc.monthlyCogsData?.[monthKey] || outletDoc.monthlyCogsData?.[monthKey] || {};
       const sales = monthDoc.sales || outletDoc.sales || {};

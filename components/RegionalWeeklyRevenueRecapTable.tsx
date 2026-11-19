@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { OUTLETS, REGIONAL_AREAS, getAreaForOutlet, getActiveOutletNames } from '../constants';
+import { OUTLETS, REGIONAL_AREAS, getAreaForOutlet, getActiveOutletNames, findOutletData, normalizeOutletKey } from '../constants';
 import { RegionalRevenueContributionTable } from './RegionalRevenueContributionTable';
 import { RegionalWeekdayWeekendRevenueTable } from './RegionalWeekdayWeekendRevenueTable';
 
@@ -90,7 +90,7 @@ export const RegionalWeeklyRevenueRecapTable: React.FC<Props> = ({
     const fromData = Object.keys(allOutletsData || {});
     const combined = Array.from(new Set([...fromConfig, ...fromData]));
     return combined.filter(name => {
-      const d = allOutletsData?.[name];
+      const d = findOutletData(allOutletsData, name);
       return !d || !d.isDeleted;
     });
   }, [allOutletsData]);
@@ -102,7 +102,8 @@ export const RegionalWeeklyRevenueRecapTable: React.FC<Props> = ({
       list = list.filter(o => getAreaForOutlet(o) === activeArea);
     }
     if (activeOutlet !== 'ALL') {
-      list = list.filter(o => o === activeOutlet);
+      const canonActive = normalizeOutletKey(activeOutlet);
+      list = list.filter(o => normalizeOutletKey(o) === canonActive);
     }
     if (searchTerm.trim()) {
       const q = searchTerm.toLowerCase();
@@ -121,7 +122,7 @@ export const RegionalWeeklyRevenueRecapTable: React.FC<Props> = ({
     const outletRatios: Record<string, { lunchRatio: number; dinnerRatio: number; lunchPct: number; dinnerPct: number }> = {};
 
     targetOutlets.forEach(outletName => {
-      const outletMonths = allOutletsData?.[outletName] || allOutletsData?.[outletName.trim()] || Object.entries(allOutletsData || {}).find(([k]) => k.trim().toUpperCase() === outletName.trim().toUpperCase())?.[1] || {};
+      const outletMonths = findOutletData(allOutletsData, outletName) || {};
       const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || outletMonths.monthlyData?.[String(selectedMonth)] || outletMonths.monthlyData?.[selectedMonth] || {};
       const sales = mData.sales || outletMonths.sales || mData || {};
       const dailyRec = sales.dailyRecording || mData.dailyRecording || outletMonths.dailyRecording || outletMonths.dailySales || {};
@@ -173,7 +174,7 @@ export const RegionalWeeklyRevenueRecapTable: React.FC<Props> = ({
       let dayDinnerSum = 0;
 
       targetOutlets.forEach(outletName => {
-        const outletMonths = allOutletsData?.[outletName] || allOutletsData?.[outletName.trim()] || Object.entries(allOutletsData || {}).find(([k]) => k.trim().toUpperCase() === outletName.trim().toUpperCase())?.[1] || {};
+        const outletMonths = findOutletData(allOutletsData, outletName) || {};
         const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || outletMonths.monthlyData?.[String(selectedMonth)] || outletMonths.monthlyData?.[selectedMonth] || {};
         const sales = mData.sales || outletMonths.sales || mData || {};
         const dailyRec = sales.dailyRecording || mData.dailyRecording || outletMonths.dailyRecording || outletMonths.dailySales || {};
@@ -335,7 +336,7 @@ export const RegionalWeeklyRevenueRecapTable: React.FC<Props> = ({
   const outletSummaries = useMemo(() => {
     return filteredOutlets.map(outletName => {
       const area = getAreaForOutlet(outletName);
-      const outletMonths = allOutletsData?.[outletName] || allOutletsData?.[outletName.trim()] || Object.entries(allOutletsData || {}).find(([k]) => k.trim().toUpperCase() === outletName.trim().toUpperCase())?.[1] || {};
+      const outletMonths = findOutletData(allOutletsData, outletName) || {};
       const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || outletMonths.monthlyData?.[String(selectedMonth)] || outletMonths.monthlyData?.[selectedMonth] || {};
       const sales = mData.sales || outletMonths.sales || mData || {};
       const dailyRec = sales.dailyRecording || mData.dailyRecording || outletMonths.dailyRecording || outletMonths.dailySales || {};

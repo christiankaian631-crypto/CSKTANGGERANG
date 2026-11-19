@@ -6,7 +6,9 @@ import {
   getQaScoreTier, 
   QA_PASSING_SCORES,
   MONTHS,
-  getActiveRegionalAreas
+  getActiveRegionalAreas,
+  findOutletData,
+  normalizeOutletKey
 } from '../constants';
 import { 
   extractOutletManpowerMap, 
@@ -75,11 +77,13 @@ export const buildSingleOutletWaReport = (
   const areaName = forcedAreaName || getAreaForOutlet(outletName) || 'JAKARTA';
 
   // Outlet data resolution
-  const outletDoc = (allOutletsData && allOutletsData[outletName]) || (allOutletsData && allOutletsData[outletName.trim()]) || {};
+  const canonOutlet = normalizeOutletKey(outletName);
+  const isSessionOutletMatch = Boolean((globalData as any)?.outlet && normalizeOutletKey((globalData as any).outlet) === canonOutlet);
+  const outletDoc = findOutletData(allOutletsData, outletName) || {};
   const monthDoc = outletDoc[String(selectedMonth)] || outletDoc[selectedMonth] || outletDoc.monthlyData?.[String(selectedMonth)] || {};
   const prevMonthDoc = outletDoc[String(prevMonthIdx)] || outletDoc[prevMonthIdx] || outletDoc.monthlyData?.[String(prevMonthIdx)] || {};
 
-  const sales = monthDoc.sales || outletDoc.sales || (globalData && globalData.outlet === outletName ? globalData.sales : {});
+  const sales = monthDoc.sales || outletDoc.sales || (isSessionOutletMatch ? globalData?.sales : {});
   const dailyRec = sales?.dailyRecording || monthDoc.dailyRecording || outletDoc.dailyRecording || {};
   const cogsData = monthDoc.monthlyCogsData?.[monthKey] || outletDoc.monthlyCogsData?.[monthKey] || {};
 
@@ -278,7 +282,7 @@ export const buildSingleOutletWaReport = (
   // ==========================================
   // 4. OVERTIME (Cut-off 26 - 25)
   // ==========================================
-  const allManpower = extractOutletManpowerMap(outletDoc, globalData?.manpowerData);
+  const allManpower = extractOutletManpowerMap(outletDoc, isSessionOutletMatch ? globalData?.manpowerData : undefined);
   const mpData: OutletManpowerData = resolveOutletManpowerData(allManpower, outletName, monthKey);
   const mpSummary = calculateManpowerSummary(mpData);
   const totalManPower = mpSummary.grandTotalActual;
@@ -298,7 +302,7 @@ export const buildSingleOutletWaReport = (
       if (!allDailyOT[dStr]) allDailyOT[dStr] = [];
       arr.forEach((e: any) => {
         if (!e) return;
-        if (!e.outlet || e.outlet === outletName) allDailyOT[dStr].push(e);
+        if (!e.outlet || normalizeOutletKey(e.outlet) === canonOutlet) allDailyOT[dStr].push(e);
       });
     });
   };

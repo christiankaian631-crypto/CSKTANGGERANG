@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, OutletManpowerData } from '../types';
-import { OUTLETS, REGIONAL_AREAS, getAreaForOutlet, getActiveOutletNames, getActiveRegionalAreas } from '../constants';
+import { OUTLETS, REGIONAL_AREAS, getAreaForOutlet, getActiveOutletNames, getActiveRegionalAreas, findOutletData, normalizeOutletKey } from '../constants';
 import { createDefaultManpowerData, calculateManpowerSummary, extractOutletManpowerMap, resolveOutletManpowerData } from '../lib/manpowerUtils';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -60,8 +60,12 @@ export const RegionalManpowerRecapTable: React.FC<Props> = ({
   const outletManpowerList = useMemo(() => {
     return targetOutlets.map(outlet => {
       const area = getAreaForOutlet(outlet) || 'JAKARTA';
-      const outletRawData = allOutletsData?.[outlet] || {};
-      const allManpower = extractOutletManpowerMap(outletRawData, globalData?.manpowerData);
+      const outletRawData = findOutletData(allOutletsData, outlet) || {};
+      const isSessionOutletMatch = Boolean(
+        (globalData as any)?.outlet &&
+        normalizeOutletKey((globalData as any).outlet) === normalizeOutletKey(outlet)
+      );
+      const allManpower = extractOutletManpowerMap(outletRawData, isSessionOutletMatch ? globalData?.manpowerData : undefined);
       const mpData: OutletManpowerData = resolveOutletManpowerData(allManpower, outlet, monthKey);
       const summary = calculateManpowerSummary(mpData);
 

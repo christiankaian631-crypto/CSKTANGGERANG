@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { OUTLETS, getAreaForOutlet, MONTHS, getActiveOutletNames } from '../constants';
+import { OUTLETS, getAreaForOutlet, MONTHS, getActiveOutletNames, findOutletData, normalizeOutletKey } from '../constants';
 import { AppState } from '../types';
 
 interface Props {
@@ -60,7 +60,7 @@ export const RegionalRevenueContributionTable: React.FC<Props> = ({
     const fromData = Object.keys(allOutletsData || {});
     const combined = Array.from(new Set([...fromConfig, ...fromData]));
     return combined.filter(name => {
-      const d = allOutletsData?.[name];
+      const d = findOutletData(allOutletsData, name);
       return !d || !d.isDeleted;
     });
   }, [allOutletsData]);
@@ -72,7 +72,8 @@ export const RegionalRevenueContributionTable: React.FC<Props> = ({
       list = list.filter(o => getAreaForOutlet(o) === activeArea);
     }
     if (activeOutlet !== 'ALL') {
-      list = list.filter(o => o === activeOutlet);
+      const canonActive = normalizeOutletKey(activeOutlet);
+      list = list.filter(o => normalizeOutletKey(o) === canonActive);
     }
     if (searchTerm.trim()) {
       const q = searchTerm.toLowerCase();
@@ -98,7 +99,7 @@ export const RegionalRevenueContributionTable: React.FC<Props> = ({
     let dinnerSum = 0;
 
     outlets.forEach(oName => {
-      const outletMonths = allOutletsData?.[oName] || allOutletsData?.[oName.trim()] || Object.entries(allOutletsData || {}).find(([k]) => k.trim().toUpperCase() === oName.trim().toUpperCase())?.[1] || {};
+      const outletMonths = findOutletData(allOutletsData, oName) || {};
       const mData = outletMonths[String(m)] || outletMonths[m] || outletMonths.monthlyData?.[String(m)] || outletMonths.monthlyData?.[m] || {};
       const sales = mData.sales || outletMonths.sales || mData || {};
       const dailyRec = sales.dailyRecording || mData.dailyRecording || outletMonths.dailyRecording || outletMonths.dailySales || {};

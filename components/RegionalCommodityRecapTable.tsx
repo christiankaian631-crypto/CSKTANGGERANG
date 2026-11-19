@@ -1,6 +1,6 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, Outlet, LedgerItem } from '../types';
-import { OUTLETS, REGIONAL_AREAS, MONTHS, getAreaForOutlet, getActiveOutletNames } from '../constants';
+import { OUTLETS, REGIONAL_AREAS, MONTHS, getAreaForOutlet, getActiveOutletNames, findOutletData, normalizeOutletKey } from '../constants';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 
@@ -72,9 +72,11 @@ export const RegionalCommodityRecapTable: React.FC<Props> = ({
   const outletRows: CommodityOutletRow[] = useMemo(() => {
     const activeNames = getActiveOutletNames();
     return activeNames.map(outletName => {
-      const outletMonths = allOutletsData?.[outletName] || {};
+      const canonOutlet = normalizeOutletKey(outletName);
+      const isSessionOutletMatch = Boolean(data?.outlet && normalizeOutletKey(data.outlet) === canonOutlet);
+      const outletMonths = findOutletData(allOutletsData, outletName) || {};
       const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || {};
-      const fromData = (outletName === data?.outlet || outletName === selectedOutlet) ? (data?.dailyCommodityLedger || {}) : {};
+      const fromData = isSessionOutletMatch ? (data?.dailyCommodityLedger || {}) : {};
       const commodityLedger: Record<string, LedgerItem[]> = {
         ...(outletMonths.dailyCommodityLedger || {}),
         ...(mData.dailyCommodityLedger || {}),
@@ -85,7 +87,7 @@ export const RegionalCommodityRecapTable: React.FC<Props> = ({
       const pettyCashLedger: Record<string, any[]> = {
         ...(outletMonths.dailyPettyCash || {}),
         ...(mData.dailyPettyCash || {}),
-        ...((outletName === data?.outlet || outletName === selectedOutlet) ? (data?.dailyPettyCash || {}) : {})
+        ...(isSessionOutletMatch ? (data?.dailyPettyCash || {}) : {})
       };
 
       Object.entries(pettyCashLedger).forEach(([dKey, pItems]) => {

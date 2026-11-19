@@ -10,7 +10,9 @@ import {
   saveStoredDivisionNotes,
   DivisionNotes,
   getActiveOutletNames,
-  getActiveRegionalAreas
+  getActiveRegionalAreas,
+  findOutletData,
+  normalizeOutletKey
 } from '../constants';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -158,14 +160,22 @@ export const RegionalWeeklyOvertimeRecapTable: React.FC<Props> = ({
   // Aggregation of Overtime data for all target outlets
   const outletOvertimeData = useMemo(() => {
     return displayedOutlets.map(outlet => {
+      const canonOutlet = normalizeOutletKey(outlet);
+      const isSessionOutletMatch = Boolean(
+        (globalData as any)?.outlet &&
+        normalizeOutletKey((globalData as any).outlet) === canonOutlet
+      );
+
       // 1. Resolve staff list for this outlet
-      const outletRawData = allOutletsData?.[outlet] || {};
+      const outletRawData = findOutletData(allOutletsData, outlet) || {};
       const currentMonthData = outletRawData[String(selectedMonth)] || outletRawData[selectedMonth] || {};
       const prevMonthData = outletRawData[String(prevMonthIdx)] || outletRawData[prevMonthIdx] || {};
 
       const rootStaffList = Array.isArray(outletRawData.staffList) ? outletRawData.staffList : [];
       const mStaffList = Array.isArray(currentMonthData.staffList) ? currentMonthData.staffList : [];
-      const gStaffList = (globalData?.staffList || []).filter((s: any) => s && s.outlet === outlet);
+      const gStaffList = isSessionOutletMatch
+        ? (globalData?.staffList || []).filter((s: any) => s && (!s.outlet || normalizeOutletKey(s.outlet) === canonOutlet))
+        : [];
 
       // Best staff list
       const staffMap = new Map<string, { id: string; name: string; division: string; normDiv: string; role: string }>();
@@ -186,7 +196,7 @@ export const RegionalWeeklyOvertimeRecapTable: React.FC<Props> = ({
       // 2. Daily Overtime Entries collection
       const dailyOTCurrent = currentMonthData.dailyOvertime || outletRawData.dailyOvertime || {};
       const dailyOTPrev = prevMonthData.dailyOvertime || {};
-      const globalOT = globalData?.dailyOvertime || {};
+      const globalOT = isSessionOutletMatch ? (globalData?.dailyOvertime || {}) : {};
 
       // Combine daily overtime
       const allDailyOT: Record<string, OvertimeEntry[]> = {};
@@ -199,8 +209,8 @@ export const RegionalWeeklyOvertimeRecapTable: React.FC<Props> = ({
           arr.forEach((e: any) => {
             if (!e) return;
             // Check if this overtime belongs to this outlet
-            const eOutlet = e.outlet || outlet;
-            if (eOutlet === outlet) {
+            const eOutlet = e.outlet ? normalizeOutletKey(e.outlet) : canonOutlet;
+            if (eOutlet === canonOutlet) {
               allDailyOT[dStr].push(e);
             }
           });
@@ -209,7 +219,9 @@ export const RegionalWeeklyOvertimeRecapTable: React.FC<Props> = ({
 
       mergeOTSource(dailyOTPrev);
       mergeOTSource(dailyOTCurrent);
-      mergeOTSource(globalOT);
+      if (isSessionOutletMatch) {
+        mergeOTSource(globalOT);
+      }
 
       // 3. Weekly Aggregations (Week 1 to Week 5)
       interface WeekStat {
@@ -321,7 +333,7 @@ export const RegionalWeeklyOvertimeRecapTable: React.FC<Props> = ({
       const totalPayMTD = weekStats.reduce((acc, w) => acc + w.pay, 0);
 
       // Staff counts by division (Total Manpower) from the Man Power Table for this outlet
-      const allManpower = extractOutletManpowerMap(outletRawData, globalData?.manpowerData);
+      const allManpower = extractOutletManpowerMap(outletRawData, isSessionOutletMatch ? globalData?.manpowerData : undefined);
       const outletMpData = resolveOutletManpowerData(allManpower, outlet, monthKey);
       const mpSummary = calculateManpowerSummary(outletMpData);
 
@@ -348,7 +360,7 @@ export const RegionalWeeklyOvertimeRecapTable: React.FC<Props> = ({
       // Calculate Last Month Overtime for Compare Last Month
       let lmHours = 0;
       let lmPay = 0;
-      const prevOutletData = (allOutletsData[outlet]?.[prevMonthIdx]) || (allOutletsData[outlet]?.[String(prevMonthIdx)]);
+      const prevOutletData = outletRawData?.[prevMonthIdx] || outletRawData?.[String(prevMonthIdx)];
       if (prevOutletData) {
         const lmDailyOT = prevOutletData.dailyOvertime || {};
         Object.values(lmDailyOT).forEach((entries: any) => {

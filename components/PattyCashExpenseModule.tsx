@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { AppState, LedgerItem, Outlet } from '../types';
-import { OUTLETS, INITIAL_STATE } from '../constants';
-import { safeStorage, safeWindow, safeClipboard } from '../lib/safeStorage';
+import { OUTLETS, INITIAL_STATE, normalizeOutletKey } from '../constants';
+import { safeStorage, safeWindow, safeClipboard, getScopedStorageItem, setScopedStorageItem } from '../lib/safeStorage';
 import ShareActions from './ShareActions';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -117,7 +117,7 @@ export const PattyCashExpenseModule: React.FC<Props> = ({
 
   const defaultOutlet = isRegionalView 
     ? (propSelectedOutlet || 'ALL')
-    : (propSelectedOutlet || 'SH THE BARN');
+    : (propSelectedOutlet || (data as any)?.outlet || '');
 
   const [activeOutlet, setActiveOutlet] = useState<string>(defaultOutlet);
   const [moduleTab, setModuleTab] = useState<'REGIONAL_RECAP' | 'INPUT' | 'MATRIX' | 'FULL_DATE'>(
@@ -895,14 +895,10 @@ export const PattyCashExpenseModule: React.FC<Props> = ({
       return data.pattyCashCategoryBudgets;
     }
 
-    const localSaved = safeStorage.getItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`);
+    const outletScope = normalizeOutletKey(activeOutlet !== 'ALL' ? activeOutlet : (data as any)?.outlet);
+    const localSaved = getScopedStorageItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`, outletScope);
     if (localSaved) {
       try { return JSON.parse(localSaved); } catch (e) { /* ignore */ }
-    }
-
-    const globalSaved = safeStorage.getItem('PATTY_CASH_CAT_BUDGET_NOMINAL');
-    if (globalSaved) {
-      try { return JSON.parse(globalSaved); } catch (e) { /* ignore */ }
     }
 
     // If legacy percentage exists and MTD actual revenue > 0, convert to nominals
@@ -917,7 +913,7 @@ export const PattyCashExpenseModule: React.FC<Props> = ({
     }
 
     return DEFAULT_CAT_BUDGET_NOMINALS;
-  }, [data.monthlyPattyCashCategoryBudgets, data.pattyCashCategoryBudgets, data.monthlyPattyCashCategoryBudgetPct, data.pattyCashCategoryBudgetPct, monthPrefix, mtdActualRevenue, DEFAULT_CAT_BUDGET_NOMINALS]);
+  }, [data.monthlyPattyCashCategoryBudgets, data.pattyCashCategoryBudgets, data.monthlyPattyCashCategoryBudgetPct, data.pattyCashCategoryBudgetPct, monthPrefix, mtdActualRevenue, DEFAULT_CAT_BUDGET_NOMINALS, activeOutlet, (data as any)?.outlet]);
 
   // Total Patty Cash Budget Nominal (Sum of all category nominal budgets)
   const pattyCashBudget = useMemo(() => {
@@ -1173,8 +1169,8 @@ export const PattyCashExpenseModule: React.FC<Props> = ({
       onUpdate('pattyCashBudgetPercentage', totalPct);
     }
 
-    safeStorage.setItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`, JSON.stringify(updatedNominals));
-    safeStorage.setItem('PATTY_CASH_CAT_BUDGET_NOMINAL', JSON.stringify(updatedNominals));
+    const outletScope = normalizeOutletKey(activeOutlet !== 'ALL' ? activeOutlet : (data as any)?.outlet);
+    setScopedStorageItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthPrefix}`, JSON.stringify(updatedNominals), outletScope);
 
     setIsEditingBudgetModal(false);
     showToast?.(`Budget Kategori Patty Cash (Total: Rp ${totalNominal.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}) berhasil disimpan!`, 'success');

@@ -1,8 +1,8 @@
 import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { getAreaForOutlet } from '../constants';
-import { safeStorage } from '../lib/safeStorage';
+import { getAreaForOutlet, normalizeOutletKey } from '../constants';
+import { safeStorage, getScopedStorageItem } from '../lib/safeStorage';
 
 /**
  * Resolves the Patty Cash Budget for an outlet and month
@@ -76,17 +76,16 @@ export const resolvePattyCashBudget = (
   }
 
   try {
-    const keysToTry = [
-      outletName ? `PATTY_CASH_CAT_BUDGET_NOMINAL_${outletName}_${monthKey}` : null,
-      `PATTY_CASH_CAT_BUDGET_NOMINAL_${monthKey}`,
-      `PATTY_CASH_CAT_BUDGET_NOMINAL`,
-      `EXPENSE_CATEGORY_BUDGETS_${monthKey}`,
-      `EXPENSE_CATEGORY_BUDGETS`
-    ].filter(Boolean) as string[];
+    const canonOutlet = normalizeOutletKey(outletName);
+    if (canonOutlet && canonOutlet !== 'ALL' && canonOutlet !== 'SEMUA OUTLET') {
+      const scopedCandidates = [
+        getScopedStorageItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${monthKey}`, canonOutlet),
+        getScopedStorageItem(`EXPENSE_CATEGORY_BUDGETS_${monthKey}`, canonOutlet),
+        safeStorage.getItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${canonOutlet}_${monthKey}`),
+        outletName ? safeStorage.getItem(`PATTY_CASH_CAT_BUDGET_NOMINAL_${outletName}_${monthKey}`) : null
+      ].filter(Boolean) as string[];
 
-    for (const k of keysToTry) {
-      const item = safeStorage.getItem(k);
-      if (item) {
+      for (const item of scopedCandidates) {
         const parsed = JSON.parse(item);
         if (parsed && typeof parsed === 'object') {
           const s = (Object.values(parsed) as any[]).reduce(

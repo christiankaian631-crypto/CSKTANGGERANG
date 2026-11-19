@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { AppState, Outlet, BankingPromoItem } from '../types';
-import { OUTLETS, MONTHS, getStoredBankPromos, getActiveOutletNames } from '../constants';
+import { OUTLETS, MONTHS, getStoredBankPromos, getActiveOutletNames, findOutletData } from '../constants';
 import { safeStorage } from '../lib/safeStorage';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -150,7 +150,7 @@ export const RegionalPromoRecapTable: React.FC<Props> = ({
     // Pull from each outlet's data across months
     const activeOutlets = getActiveOutletNames();
     activeOutlets.forEach(outletName => {
-      const outletMonths = allOutletsData?.[outletName] || {};
+      const outletMonths = findOutletData(allOutletsData, outletName) || {};
       const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || {};
 
       const outPromos = outletMonths.bankingPromos || mData.bankingPromos || outletMonths.promoSettings?.customBankPromos || mData.promoSettings?.customBankPromos;
@@ -176,7 +176,7 @@ export const RegionalPromoRecapTable: React.FC<Props> = ({
       let participatingOutletsCount = 0;
 
       targetOutlets.forEach(outletName => {
-        const outletMonths = allOutletsData?.[outletName] || {};
+        const outletMonths = findOutletData(allOutletsData, outletName) || {};
         const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || {};
         const sales = mData.sales || outletMonths.sales || {};
         const dailyRecording = sales.dailyRecording || outletMonths.dailyRecording || mData.dailyRecording || {};

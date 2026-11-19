@@ -1,8 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { AppState } from '../types';
-import { MONTHS } from '../constants';
+import { MONTHS, normalizeOutletKey } from '../constants';
 import ShareActions from './ShareActions';
-import { safeStorage } from '../lib/safeStorage';
+import { getScopedStorageItem, setScopedStorageItem } from '../lib/safeStorage';
 
 interface Props {
   data: AppState;
@@ -50,6 +50,8 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
     return new Date(lastMonthYear, lastMonthIndex + 1, 0).getDate();
   }, [lastMonthYear, lastMonthIndex]);
 
+  const outletScope = normalizeOutletKey(selectedOutlet);
+
   // Resolve Category Budgets
   const categoryBudgets = useMemo(() => {
     const monthlyState = currentMonthState.monthlyExpenseCategoryBudgets?.[currentMonthPrefix];
@@ -57,14 +59,9 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
 
     if (currentMonthState.expenseCategoryBudgets) return currentMonthState.expenseCategoryBudgets;
 
-    const savedLocal = safeStorage.getItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`);
+    const savedLocal = getScopedStorageItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`, outletScope);
     if (savedLocal) {
       try { return JSON.parse(savedLocal); } catch (e) { /* ignore */ }
-    }
-
-    const savedGlobal = safeStorage.getItem('EXPENSE_CATEGORY_BUDGETS');
-    if (savedGlobal) {
-      try { return JSON.parse(savedGlobal); } catch (e) { /* ignore */ }
     }
 
     return {
@@ -75,7 +72,7 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
       atk: 0,
       asset: 0,
     };
-  }, [currentMonthState, currentMonthPrefix]);
+  }, [currentMonthState, currentMonthPrefix, outletScope]);
 
   const [isEditingBudgets, setIsEditingBudgets] = useState(false);
   const [tempCategoryBudgets, setTempCategoryBudgets] = useState({
@@ -86,6 +83,19 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
     atk: String(categoryBudgets.atk || 0),
     asset: String(categoryBudgets.asset || 0),
   });
+
+  useEffect(() => {
+    if (!isEditingBudgets) {
+      setTempCategoryBudgets({
+        commodity: String(categoryBudgets.commodity || 0),
+        nonCommodity: String(categoryBudgets.nonCommodity || 0),
+        chemical: String(categoryBudgets.chemical || 0),
+        maintenance: String(categoryBudgets.maintenance || 0),
+        atk: String(categoryBudgets.atk || 0),
+        asset: String(categoryBudgets.asset || 0),
+      });
+    }
+  }, [categoryBudgets, isEditingBudgets]);
 
   const handleSaveBudgets = () => {
     const updated = {
@@ -106,8 +116,7 @@ const PattyCashOpexRekapanModule: React.FC<Props> = ({ data, allMonthlyData, fil
       onUpdate('expenseCategoryBudgets', updated);
     }
 
-    safeStorage.setItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`, JSON.stringify(updated));
-    safeStorage.setItem('EXPENSE_CATEGORY_BUDGETS', JSON.stringify(updated));
+    setScopedStorageItem(`EXPENSE_CATEGORY_BUDGETS_${currentMonthPrefix}`, JSON.stringify(updated), outletScope);
 
     setIsEditingBudgets(false);
     showToast?.(`Budget Kategori Expense untuk ${MONTHS[selectedMonth]} ${selectedYear} berhasil disimpan!`, 'success');

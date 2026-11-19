@@ -12,7 +12,8 @@ import {
   getActiveOutletConfigs,
   findOutletData,
   getOutletMonthData,
-  extractAllGSIEntries
+  extractAllGSIEntries,
+  normalizeOutletKey
 } from '../constants';
 import { createDefaultManpowerData, calculateManpowerSummary, extractOutletManpowerMap, resolveOutletManpowerData } from '../lib/manpowerUtils';
 import { calculateReceivingSheetTotalBelanja } from '../lib/moduleAnalytics';
@@ -170,7 +171,7 @@ export const RegionalSummaryDashboard: React.FC<Props> = ({
 
   const activeNames = useMemo(() => {
     return getActiveOutletNames(activeOutletConfigs).filter(name => {
-      const d = data?.[name];
+      const d = findOutletData(data, name);
       return !d || !d.isDeleted;
     });
   }, [activeOutletConfigs, data]);
@@ -182,7 +183,8 @@ export const RegionalSummaryDashboard: React.FC<Props> = ({
   // Determine target outlets based on area / outlet filter
   const targetOutlets = useMemo(() => {
     if (selectedOutlet && selectedOutlet !== 'ALL') {
-      return activeNames.filter(o => o === selectedOutlet);
+      const canonSelected = normalizeOutletKey(selectedOutlet);
+      return activeNames.filter(o => normalizeOutletKey(o) === canonSelected);
     }
     if (selectedArea && selectedArea !== 'ALL') {
       const areaList = activeRegionalAreas[selectedArea] || [];
@@ -654,7 +656,11 @@ export const RegionalSummaryDashboard: React.FC<Props> = ({
       const opexPercent = d.opexPercent;
 
       // Manpower from Outlet Manpower Table
-      const allMp = extractOutletManpowerMap(outletMonths, globalData?.manpowerData);
+      const isSessionOutletMatch = Boolean(
+        (globalData as any)?.outlet &&
+        normalizeOutletKey((globalData as any).outlet) === normalizeOutletKey(d.outlet)
+      );
+      const allMp = extractOutletManpowerMap(outletMonths, isSessionOutletMatch ? globalData?.manpowerData : undefined);
       const outletMpData = resolveOutletManpowerData(allMp, d.outlet, monthKey);
       const mpSummary = calculateManpowerSummary(outletMpData);
       const mpFulfillment = mpSummary.grandTotalBudget > 0 ? (mpSummary.grandTotalActual / mpSummary.grandTotalBudget) * 100 : 0;
@@ -665,7 +671,7 @@ export const RegionalSummaryDashboard: React.FC<Props> = ({
       qMonths.forEach(qm => {
         const qmPrefix = `${selectedYear}-${String(qm + 1).padStart(2, '0')}`;
         const qmData = outletMonths[String(qm)] || outletMonths[qm] || {};
-        const qmQA = { ...(qmData.dailyQA || {}), ...(globalData?.outlet === d.outlet ? (globalData.dailyQA || {}) : {}) };
+        const qmQA = { ...(qmData.dailyQA || {}), ...(isSessionOutletMatch ? (globalData.dailyQA || {}) : {}) };
         let mK = 0, mB = 0, mS = 0, mCount = 0;
         Object.entries(qmQA).forEach(([dt, val]: [string, any]) => {
           if (dt.startsWith(qmPrefix) && val) {
@@ -700,7 +706,7 @@ export const RegionalSummaryDashboard: React.FC<Props> = ({
       const otUtilization = otBudgetPay > 0 ? (otTotalPay / otBudgetPay) * 100 : 0;
 
       // Energy Cost
-      const energyData = mData.energyCost || (globalData?.outlet === d.outlet ? globalData.energyCost : {}) || {};
+      const energyData = mData.energyCost || (isSessionOutletMatch ? globalData.energyCost : {}) || {};
       const energyElectricity = Number(energyData.electricity?.cost) || Number(energyData.electricityCost) || 0;
       const energyWater = Number(energyData.water?.cost) || Number(energyData.waterCost) || 0;
       const energyGas = Number(energyData.gas?.cost) || Number(energyData.gasCost) || 0;

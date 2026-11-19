@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { ModuleType, AppState, User, SyncStatus, Outlet, Notification, LeaveRecord, CustomSupplier, Presence, PresenceEvent } from './types';
-import { INITIAL_STATE, ROLES_BY_DIVISION, DIVISIONS, OUTLETS, getActiveOutletNames, getStoredCustomSuppliers } from './constants';
+import { INITIAL_STATE, ROLES_BY_DIVISION, DIVISIONS, OUTLETS, getActiveOutletNames, getStoredCustomSuppliers, normalizeOutletKey } from './constants';
 import { fetchUserData, saveGlobalData, saveOutletData, startRealtimeListener, startNotificationListener, isQuotaExceeded, resetQuotaExceeded, fetchAllOutletsData, startAllOutletsListener, testConnection } from './services/cloudService';
 import { safeStorage, safeSessionStorage, safeClipboard, safeWindow } from './lib/safeStorage';
 import { toLocalDateStr } from './lib/dateUtils';
@@ -162,26 +162,28 @@ const cleanOutletDataOfDefaultLogistics = (outletData: any) => {
   return cleaned;
 };
 
+const createFreshGlobalData = () => ({
+  staffList: INITIAL_STATE.staffList,
+  leaveRecords: INITIAL_STATE.leaveRecords,
+  manpowerData: {} as Record<string, any>,
+  dailyOvertime: INITIAL_STATE.dailyOvertime,
+  weeklyOvertime: (INITIAL_STATE as any).weeklyOvertime || {},
+  dailyAttendance: INITIAL_STATE.dailyAttendance,
+  dailyExternalAudit: INITIAL_STATE.dailyExternalAudit || {},
+  dailyCPA: INITIAL_STATE.dailyCPA || {},
+  dailyGSI: INITIAL_STATE.dailyGSI || {},
+  guestComplaints: INITIAL_STATE.guestComplaints || [],
+  affiliateHistory: INITIAL_STATE.affiliateHistory || [],
+  customSuppliers: getStoredCustomSuppliers()
+});
+
 const App: React.FC = () => {
   const [user, setUser] = useState<User>({ email: '', isLoggedIn: false });
   const [isAuthReady, setIsAuthReady] = useState(false);
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('offline');
   const syncTimeout = useRef<any>(null);
   const toastTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const [globalData, setGlobalDataState] = useState({
-    staffList: INITIAL_STATE.staffList,
-    leaveRecords: INITIAL_STATE.leaveRecords,
-    manpowerData: {} as Record<string, any>,
-    dailyOvertime: INITIAL_STATE.dailyOvertime,
-    weeklyOvertime: (INITIAL_STATE as any).weeklyOvertime || {},
-    dailyAttendance: INITIAL_STATE.dailyAttendance,
-    dailyExternalAudit: INITIAL_STATE.dailyExternalAudit || {},
-    dailyCPA: INITIAL_STATE.dailyCPA || {},
-    dailyGSI: INITIAL_STATE.dailyGSI || {},
-    guestComplaints: INITIAL_STATE.guestComplaints || [],
-    affiliateHistory: INITIAL_STATE.affiliateHistory || [],
-    customSuppliers: getStoredCustomSuppliers()
-  });
+  const [globalData, setGlobalDataState] = useState(createFreshGlobalData);
   const [outletMonthlyData, setOutletMonthlyDataState] = useState<Record<string, any>>({});
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [birthdayNotifications, setBirthdayNotifications] = useState<Notification[]>([]);
@@ -289,6 +291,22 @@ const App: React.FC = () => {
   useEffect(() => {
     globalDataRef.current = globalData;
   }, [globalData]);
+
+  const resetOutletSessionState = useCallback(() => {
+    if (syncTimeout.current) {
+      clearTimeout(syncTimeout.current);
+      syncTimeout.current = null;
+    }
+    flushPendingSyncRef.current = null;
+    isPrioritySync.current = false;
+    isHydrated.current = false;
+    lastSyncedGlobal.current = {};
+    lastSyncedOutlet.current = {};
+    const freshGlobal = createFreshGlobalData();
+    globalDataRef.current = freshGlobal;
+    setGlobalDataState(freshGlobal);
+    setOutletMonthlyDataState({});
+  }, []);
 
   // Synchronize dynamic settings (like Batas Maksimal Input Harian) across users in real-time
   useEffect(() => {
@@ -963,8 +981,10 @@ const App: React.FC = () => {
       activeCustomSuppliers = getStoredCustomSuppliers();
     }
 
+    const canonicalSelectedOutlet = user.isLoggedIn && user.selectedOutlet ? normalizeOutletKey(user.selectedOutlet) : '';
     return {
       ...monthBase,
+      ...(canonicalSelectedOutlet ? { outlet: canonicalSelectedOutlet } : {}),
       dailyRecording: activeDailyRec,
       sales: {
         ...(monthBase.sales || {}),
@@ -981,7 +1001,7 @@ const App: React.FC = () => {
       peminjamanRecords: mergedPeminjaman,
       logisticPeriodPrices: mergedPeriodPrices
     } as AppState;
-  }, [outletMonthlyData, filters.month, globalData.manpowerData, globalData.customSuppliers]);
+  }, [outletMonthlyData, filters.month, globalData.manpowerData, globalData.customSuppliers, user.isLoggedIn, user.selectedOutlet]);
 
   const dataRef = useRef<AppState>(currentData);
   useEffect(() => {
@@ -1063,32 +1083,41 @@ const App: React.FC = () => {
   }, []);
 
   const mergedAllOutletsData = useMemo(() => {
-    const activeNames = new Set(getActiveOutletNames());
+    const activeNames = new Set(getActiveOutletNames().map(n => normalizeOutletKey(n) || n));
     const merged: Record<string, any> = {};
 
-    // 1. Include all valid outlets from Firestore listener & server sync (allOutletsData)
+    // 1. Include all valid non-deleted outlets from Firestore listener & server sync under canonical keys
     Object.entries(allOutletsData).forEach(([oName, oVal]: [string, any]) => {
-      if (oVal) {
-        merged[oName] = { ...oVal, isDeleted: false };
+      if (!oVal || oVal.isDeleted) return;
+      const canonName = normalizeOutletKey(oName);
+      if (!canonName || canonName === 'ALL' || canonName === 'SEMUA OUTLET') return;
+      const existing = merged[canonName];
+      if (!existing || (oVal._lastUpdated && (!existing._lastUpdated || oVal._lastUpdated >= existing._lastUpdated))) {
+        merged[canonName] = { ...oVal, outlet: canonName, isDeleted: false };
       }
     });
 
     // 2. Also ensure all configured active outlets exist in merged
     activeNames.forEach(name => {
-      if (!merged[name]) {
-        merged[name] = { monthlyData: {}, isDeleted: false };
+      if (name && !merged[name]) {
+        merged[name] = { outlet: name, monthlyData: {}, isDeleted: false };
       }
     });
 
-    // 3. If user is currently editing an outlet, merge active local state synchronously
-    // so any numbers entered in this outlet instantly reflect on the Regional Page!
-    if (user.selectedOutlet) {
-      // Find matching key (exact or case-insensitive)
-      const matchedKey = Object.keys(merged).find(
-        k => k.trim().toUpperCase() === user.selectedOutlet!.trim().toUpperCase()
-      ) || user.selectedOutlet;
+    // 3. ONLY if user is logged in to a specific outlet AND hydrated, merge active local state synchronously
+    // so numbers entered in this outlet reflect instantly on Regional without cross-contaminating other outlets.
+    const canonicalSelected = user.selectedOutlet ? normalizeOutletKey(user.selectedOutlet) : '';
+    if (
+      user.isLoggedIn &&
+      isHydrated.current &&
+      canonicalSelected &&
+      canonicalSelected !== 'ALL' &&
+      canonicalSelected !== 'SEMUA OUTLET' &&
+      activeSessionKeyRef.current?.endsWith(`::${canonicalSelected}`)
+    ) {
+      const matchedKey = canonicalSelected;
 
-      const activeOutletData = { ...(merged[matchedKey] || {}) };
+      const activeOutletData = { ...(merged[matchedKey] || {}), outlet: matchedKey, isDeleted: false };
       const monthlyDataMap = { ...(activeOutletData.monthlyData || {}) };
 
       // Merge all months from outletMonthlyData
@@ -1241,12 +1270,9 @@ const App: React.FC = () => {
       activeOutletData.logisticPeriodPrices = currentData.logisticPeriodPrices || activeOutletData.logisticPeriodPrices || {};
       
       merged[matchedKey] = activeOutletData;
-      if (matchedKey !== user.selectedOutlet) {
-        merged[user.selectedOutlet] = activeOutletData;
-      }
     }
     return merged;
-  }, [allOutletsData, user.selectedOutlet, outletMonthlyData, globalData, currentData, filters.month, outletConfigVersion]);
+  }, [allOutletsData, user.isLoggedIn, user.selectedOutlet, outletMonthlyData, globalData, currentData, filters.month, outletConfigVersion]);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'success') => {
     if (toastTimeoutRef.current) clearTimeout(toastTimeoutRef.current);
@@ -1379,9 +1405,12 @@ const App: React.FC = () => {
 
   // Synchronously serialize and persist state to localStorage to prevent data loss on refresh/crash
   useEffect(() => {
-    if (!user.selectedOutlet || !isHydrated.current) return;
+    const canonicalOutlet = normalizeOutletKey(user.selectedOutlet);
+    if (!user.isLoggedIn || !canonicalOutlet || canonicalOutlet === 'ALL' || canonicalOutlet === 'SEMUA OUTLET' || !isHydrated.current) return;
+    if (!activeSessionKeyRef.current?.endsWith(`::${canonicalOutlet}`)) return;
     try {
-      safeStorage.setItem(`BARN_LOCAL_BACKUP_${user.selectedOutlet}`, JSON.stringify({
+      safeStorage.setItem(`BARN_LOCAL_BACKUP_${canonicalOutlet}`, JSON.stringify({
+        outlet: canonicalOutlet,
         globalData,
         outletMonthlyData,
         timestamp: Date.now()
@@ -1389,21 +1418,38 @@ const App: React.FC = () => {
     } catch (e) {
       // quota or storage unavailable
     }
-  }, [globalData, outletMonthlyData, user.selectedOutlet]);
+  }, [globalData, outletMonthlyData, user.isLoggedIn, user.selectedOutlet]);
 
   const handleLogin = async (email: string, outlet: Outlet) => {
     if (isLoggingOutRef.current) return;
 
     const cleanEmail = (email || '').trim().toLowerCase();
-    const outletKey = outlet;
+    const canonicalOutlet = normalizeOutletKey(outlet) as Outlet;
+    if (!canonicalOutlet || canonicalOutlet === ('ALL' as Outlet) || canonicalOutlet === ('SEMUA OUTLET' as Outlet)) {
+      console.warn('[handleLogin] Invalid outlet key blocked:', outlet);
+      return;
+    }
+    const outletKey = canonicalOutlet;
     const sessionKey = `${cleanEmail}::${outletKey}`;
 
     if (inFlightLoginRef.current && inFlightLoginRef.current.key === sessionKey) {
       return inFlightLoginRef.current.promise;
     }
 
+    // Flush any pending unsynced edits from the PREVIOUS outlet session before wiping state
+    if (activeSessionKeyRef.current && activeSessionKeyRef.current !== sessionKey && flushPendingSyncRef.current) {
+      try {
+        await flushPendingSyncRef.current();
+      } catch (e) {
+        console.warn('[handleLogin] Notice flushing previous session sync:', e);
+      }
+    }
+
+    // Reset all in-memory outlet state immediately so no previous outlet data lingers during login/switch
+    activeSessionKeyRef.current = null;
+    resetOutletSessionState();
+
     const loginPromise = (async () => {
-      isHydrated.current = false;
       setIsRefreshing(true);
 
       try {
@@ -1428,166 +1474,176 @@ const App: React.FC = () => {
           }
         }
 
-      // Check for local instant backup before remote fetch to prevent blank/lost data
-      const localBackupKey = `BARN_LOCAL_BACKUP_${outletKey}`;
-      let localBackupData: any = null;
-      const savedBackupStr = safeStorage.getItem(localBackupKey);
-      if (savedBackupStr) {
-        try {
-          localBackupData = JSON.parse(savedBackupStr);
-        } catch (e) {}
-      }
-
-      // 2. Fetch user data with 3.5s timeout safety to prevent infinite spinner
-      let cloudData: any = await Promise.race([
-        fetchUserData(cleanEmail, outletKey),
-        new Promise<any>((resolve) => {
-          setTimeout(() => {
-            console.warn('[handleLogin] fetchUserData timeout, proceeding with local fallback');
-            resolve(null);
-          }, 3500);
-        })
-      ]);
-
-      const hasPending = safeStorage.getItem(`HAS_PENDING_SYNC_${cleanEmail}_${outletKey}`) === 'true';
-
-      if (hasPending) {
-        const pendingGlobalStr = safeStorage.getItem(`PENDING_SYNC_GLOBAL_${cleanEmail}_${outletKey}`);
-        const pendingOutletStr = safeStorage.getItem(`PENDING_SYNC_OUTLET_${cleanEmail}_${outletKey}`);
-        
-        if (pendingGlobalStr || pendingOutletStr) {
-          console.info("[Offline Recovery] Merging pending local data that failed to sync previously.");
-          if (!cloudData) {
-            cloudData = {};
-          }
+        // Check for local instant backup strictly matching this canonical outlet
+        const localBackupKey = `BARN_LOCAL_BACKUP_${outletKey}`;
+        let localBackupData: any = null;
+        const savedBackupStr = safeStorage.getItem(localBackupKey);
+        if (savedBackupStr) {
           try {
-            if (pendingGlobalStr) {
-              const parsedGlobal = JSON.parse(pendingGlobalStr);
-              Object.keys(parsedGlobal).forEach(fKey => {
-                cloudData[fKey] = parsedGlobal[fKey];
-              });
+            const parsedBackup = JSON.parse(savedBackupStr);
+            if (!parsedBackup?.outlet || normalizeOutletKey(parsedBackup.outlet) === outletKey) {
+              localBackupData = parsedBackup;
             }
-            if (pendingOutletStr) {
-              const parsedOutlet = JSON.parse(pendingOutletStr);
-              Object.keys(parsedOutlet).forEach(mKey => {
-                cloudData[mKey] = parsedOutlet[mKey];
-              });
+          } catch (e) {}
+        }
+
+        // 2. Fetch user data with 3.5s timeout safety to prevent infinite spinner
+        let cloudData: any = await Promise.race([
+          fetchUserData(cleanEmail, outletKey),
+          new Promise<any>((resolve) => {
+            setTimeout(() => {
+              console.warn('[handleLogin] fetchUserData timeout, proceeding with local fallback');
+              resolve(null);
+            }, 3500);
+          })
+        ]);
+
+        // Abort hydration if a newer login or logout started while awaiting
+        if (isLoggingOutRef.current || (inFlightLoginRef.current && inFlightLoginRef.current.key !== sessionKey)) {
+          return;
+        }
+
+        const hasPending = safeStorage.getItem(`HAS_PENDING_SYNC_${cleanEmail}_${outletKey}`) === 'true';
+
+        if (hasPending) {
+          const pendingGlobalStr = safeStorage.getItem(`PENDING_SYNC_GLOBAL_${cleanEmail}_${outletKey}`);
+          const pendingOutletStr = safeStorage.getItem(`PENDING_SYNC_OUTLET_${cleanEmail}_${outletKey}`);
+
+          if (pendingGlobalStr || pendingOutletStr) {
+            console.info("[Offline Recovery] Merging pending local data that failed to sync previously.");
+            if (!cloudData) {
+              cloudData = {};
             }
-            showToast("Data tersimpan Anda telah berhasil disinkronkan ke Firebase.", "info");
-          } catch (e) {
-            console.error('[Offline Recovery] Error parsing pending sync data:', e);
+            try {
+              if (pendingGlobalStr) {
+                const parsedGlobal = JSON.parse(pendingGlobalStr);
+                Object.keys(parsedGlobal).forEach(fKey => {
+                  cloudData[fKey] = parsedGlobal[fKey];
+                });
+              }
+              if (pendingOutletStr) {
+                const parsedOutlet = JSON.parse(pendingOutletStr);
+                Object.keys(parsedOutlet).forEach(mKey => {
+                  cloudData[mKey] = parsedOutlet[mKey];
+                });
+              }
+              showToast("Data tersimpan Anda telah berhasil disinkronkan ke Firebase.", "info");
+            } catch (e) {
+              console.error('[Offline Recovery] Error parsing pending sync data:', e);
+            }
           }
         }
-      }
 
-      // If cloudData is empty/null, restore immediately from local backup to prevent data loss on refresh
-      if (!cloudData && localBackupData) {
-        cloudData = {
-          ...(localBackupData.outletMonthlyData || {}),
-          ...(localBackupData.globalData || {})
-        };
-      } else if (cloudData && localBackupData) {
-        // Merge cloud data with recent uncommitted local inputs so nothing is lost
-        const backupMonthly = localBackupData.outletMonthlyData || {};
-        const backupGlobal = localBackupData.globalData || {};
-        cloudData = {
-          ...cloudData,
-          ...backupGlobal,
-          ...Object.fromEntries(
-            Object.entries(backupMonthly).map(([mKey, mVal]: [string, any]) => [
-              mKey,
-              { ...(cloudData[mKey] || {}), ...mVal }
-            ])
-          )
-        };
-      }
-
-      if (!cloudData) {
-        cloudData = { ...INITIAL_STATE };
-      }
-
-      if (cloudData) {
-        // Clean old/uninputted default logistics items permanently from fetched data
-        cloudData = cleanOutletDataOfDefaultLogistics(cloudData);
-
-        // Clean staffList in cloudData if exists
-        if (cloudData.staffList) {
-          const rawList = Array.isArray(cloudData.staffList)
-            ? cloudData.staffList
-            : (typeof cloudData.staffList === 'object' ? Object.values(cloudData.staffList) : []);
-          const seen = new Set();
-          cloudData.staffList = rawList
-            .filter((s: any) => s && typeof s === 'object')
-            .sort(sortStaffList)
-            .filter((s: any) => {
-              if (s.id && seen.has(s.id)) return false;
-              if (s.id) seen.add(s.id);
-              return true;
-            })
-            .map((s: any) => {
-              const { leaveEntitlement, ...rest } = s;
-              return rest;
-            });
+        // If cloudData is empty/null, restore immediately from local backup to prevent data loss on refresh
+        if (!cloudData && localBackupData) {
+          cloudData = {
+            ...(localBackupData.outletMonthlyData || {}),
+            ...(localBackupData.globalData || {})
+          };
+        } else if (cloudData && localBackupData) {
+          // Merge cloud data with recent uncommitted local inputs so nothing is lost
+          const backupMonthly = localBackupData.outletMonthlyData || {};
+          const backupGlobal = localBackupData.globalData || {};
+          cloudData = {
+            ...cloudData,
+            ...backupGlobal,
+            ...Object.fromEntries(
+              Object.entries(backupMonthly).map(([mKey, mVal]: [string, any]) => [
+                mKey,
+                { ...(cloudData[mKey] || {}), ...mVal }
+              ])
+            )
+          };
         }
 
-        const {
-          staffList,
-          leaveRecords,
-          dailyOvertime,
-          weeklyOvertime,
-          dailyAttendance,
-          dailyExternalAudit,
-          dailyCPA,
-          dailyGSI,
-          guestComplaints,
-          affiliateHistory,
-          manpowerData,
-          customSuppliers,
-          ...rest
-        } = cloudData;
-        
-        const hydratedGlobal: any = {
-          staffList: Array.isArray(staffList) ? staffList : INITIAL_STATE.staffList,
-          leaveRecords: Array.isArray(leaveRecords) ? leaveRecords : INITIAL_STATE.leaveRecords,
-          dailyOvertime: dailyOvertime || INITIAL_STATE.dailyOvertime,
-          weeklyOvertime: weeklyOvertime || (INITIAL_STATE as any).weeklyOvertime || {},
-          dailyAttendance: dailyAttendance || INITIAL_STATE.dailyAttendance,
-          dailyExternalAudit: dailyExternalAudit || {},
-          dailyCPA: dailyCPA || {},
-          dailyGSI: dailyGSI || INITIAL_STATE.dailyGSI || {},
-          guestComplaints: Array.isArray(guestComplaints) ? guestComplaints : [],
-          affiliateHistory: Array.isArray(affiliateHistory) ? affiliateHistory : [],
-          manpowerData: manpowerData || {},
-          customSuppliers: Array.isArray(customSuppliers) ? customSuppliers : getStoredCustomSuppliers()
-        };
+        if (!cloudData) {
+          cloudData = { ...INITIAL_STATE };
+        }
 
-        globalDataRef.current = hydratedGlobal;
-        setGlobalDataState(hydratedGlobal);
-        setOutletMonthlyData(rest || {});
+        if (cloudData) {
+          // Clean old/uninputted default logistics items permanently from fetched data
+          cloudData = cleanOutletDataOfDefaultLogistics(cloudData);
 
-        // Build initial sync hashes accurately to avoid spurious autosave right after login
-        const globalFieldsList = ['staffList', 'leaveRecords', 'dailyOvertime', 'weeklyOvertime', 'dailyAttendance', 'dailyExternalAudit', 'dailyCPA', 'dailyGSI', 'guestComplaints', 'affiliateHistory', 'manpowerData'];
-        const nextGlobalHashes: Record<string, string> = {};
-        globalFieldsList.forEach(field => {
-          nextGlobalHashes[field] = JSON.stringify((hydratedGlobal as any)[field] ?? {});
-        });
-        lastSyncedGlobal.current = nextGlobalHashes;
+          // Clean and strictly scope staffList in cloudData to the active canonical outlet
+          if (cloudData.staffList) {
+            const rawList = Array.isArray(cloudData.staffList)
+              ? cloudData.staffList
+              : (typeof cloudData.staffList === 'object' ? Object.values(cloudData.staffList) : []);
+            const seen = new Set();
+            cloudData.staffList = rawList
+              .filter((s: any) => s && typeof s === 'object' && (!s.outlet || normalizeOutletKey(s.outlet) === outletKey))
+              .sort(sortStaffList)
+              .filter((s: any) => {
+                if (s.id && seen.has(s.id)) return false;
+                if (s.id) seen.add(s.id);
+                return true;
+              })
+              .map((s: any) => {
+                const { leaveEntitlement, ...restStaff } = s;
+                return { ...restStaff, outlet: outletKey };
+              });
+          }
 
-        const nextOutletHashes: Record<string, string> = {};
-        Object.keys(rest || {}).forEach(monthKey => {
-          nextOutletHashes[monthKey] = JSON.stringify(rest[monthKey]);
-        });
-        lastSyncedOutlet.current = nextOutletHashes;
-        isHydrated.current = true;
-      }
+          const {
+            staffList,
+            leaveRecords,
+            dailyOvertime,
+            weeklyOvertime,
+            dailyAttendance,
+            dailyExternalAudit,
+            dailyCPA,
+            dailyGSI,
+            guestComplaints,
+            affiliateHistory,
+            manpowerData,
+            customSuppliers,
+            ...rest
+          } = cloudData;
+
+          const hydratedGlobal: any = {
+            outlet: outletKey,
+            staffList: Array.isArray(staffList) ? staffList : INITIAL_STATE.staffList,
+            leaveRecords: Array.isArray(leaveRecords) ? leaveRecords : INITIAL_STATE.leaveRecords,
+            dailyOvertime: dailyOvertime || INITIAL_STATE.dailyOvertime,
+            weeklyOvertime: weeklyOvertime || (INITIAL_STATE as any).weeklyOvertime || {},
+            dailyAttendance: dailyAttendance || INITIAL_STATE.dailyAttendance,
+            dailyExternalAudit: dailyExternalAudit || {},
+            dailyCPA: dailyCPA || {},
+            dailyGSI: dailyGSI || INITIAL_STATE.dailyGSI || {},
+            guestComplaints: Array.isArray(guestComplaints) ? guestComplaints : [],
+            affiliateHistory: Array.isArray(affiliateHistory) ? affiliateHistory : [],
+            manpowerData: manpowerData || {},
+            customSuppliers: Array.isArray(customSuppliers) ? customSuppliers : getStoredCustomSuppliers()
+          };
+
+          globalDataRef.current = hydratedGlobal;
+          setGlobalDataState(hydratedGlobal);
+          setOutletMonthlyData(rest || {});
+
+          // Build initial sync hashes accurately to avoid spurious autosave right after login
+          const globalFieldsList = ['staffList', 'leaveRecords', 'dailyOvertime', 'weeklyOvertime', 'dailyAttendance', 'dailyExternalAudit', 'dailyCPA', 'dailyGSI', 'guestComplaints', 'affiliateHistory', 'manpowerData'];
+          const nextGlobalHashes: Record<string, string> = {};
+          globalFieldsList.forEach(field => {
+            nextGlobalHashes[field] = JSON.stringify((hydratedGlobal as any)[field] ?? {});
+          });
+          lastSyncedGlobal.current = nextGlobalHashes;
+
+          const nextOutletHashes: Record<string, string> = {};
+          Object.keys(rest || {}).forEach(monthKey => {
+            nextOutletHashes[monthKey] = JSON.stringify(rest[monthKey]);
+          });
+          lastSyncedOutlet.current = nextOutletHashes;
+          isHydrated.current = true;
+        }
       } catch (loginError) {
         console.warn('[handleLogin] Notice during login data hydration:', loginError);
       } finally {
+        const isCurrentAttempt = !inFlightLoginRef.current || inFlightLoginRef.current.key === sessionKey;
         if (inFlightLoginRef.current?.key === sessionKey) {
           inFlightLoginRef.current = null;
         }
         setIsRefreshing(false);
-        if (!isLoggingOutRef.current) {
+        if (!isLoggingOutRef.current && isCurrentAttempt) {
           activeSessionKeyRef.current = sessionKey;
           const photoURL = auth.currentUser?.photoURL || safeStorage.getItem('BARN_USER_PHOTO') || '';
           const displayName = auth.currentUser?.displayName || safeStorage.getItem('BARN_USER_NAME') || '';
@@ -1687,13 +1743,16 @@ const App: React.FC = () => {
   }, [forceSync, showToast]);
 
   useEffect(() => {
-    if (!user.isLoggedIn || !user.selectedOutlet) return;
-    
-    // Strict guard against overwriting cloud data with initial empty state during hydration
-    if (!isHydrated.current) {
+    const sessionEmail = (user.email || '').trim().toLowerCase();
+    const sessionOutlet = normalizeOutletKey(user.selectedOutlet);
+    if (!user.isLoggedIn || !sessionEmail || !sessionOutlet || sessionOutlet === 'ALL' || sessionOutlet === 'SEMUA OUTLET') return;
+    const sessionKey = `${sessionEmail}::${sessionOutlet}`;
+
+    // Strict guard against overwriting cloud data with initial empty state during hydration or wrong session
+    if (!isHydrated.current || activeSessionKeyRef.current !== sessionKey) {
       return;
     }
-    
+
     // 1. Identify which global fields changed
     const globalFields = ['staffList', 'leaveRecords', 'dailyOvertime', 'weeklyOvertime', 'dailyAttendance', 'dailyExternalAudit', 'dailyCPA', 'dailyGSI', 'guestComplaints', 'affiliateHistory', 'manpowerData'];
     const changedGlobalFields: Partial<any> = {};
@@ -1738,11 +1797,9 @@ const App: React.FC = () => {
 
     // SAVE LATEST LOCAL changes to survive sudden offline/quota events or browser close
     try {
-      const emailKey = user.email!.toLowerCase();
-      const outletKey = user.selectedOutlet!;
-      safeStorage.setItem(`PENDING_SYNC_GLOBAL_${emailKey}_${outletKey}`, JSON.stringify(globalData));
-      safeStorage.setItem(`PENDING_SYNC_OUTLET_${emailKey}_${outletKey}`, JSON.stringify(outletMonthlyData));
-      safeStorage.setItem(`HAS_PENDING_SYNC_${emailKey}_${outletKey}`, 'true');
+      safeStorage.setItem(`PENDING_SYNC_GLOBAL_${sessionEmail}_${sessionOutlet}`, JSON.stringify(globalData));
+      safeStorage.setItem(`PENDING_SYNC_OUTLET_${sessionEmail}_${sessionOutlet}`, JSON.stringify(outletMonthlyData));
+      safeStorage.setItem(`HAS_PENDING_SYNC_${sessionEmail}_${sessionOutlet}`, 'true');
     } catch (e) {
       console.error('[Offline Backup] Local save error:', e);
     }
@@ -1754,11 +1811,12 @@ const App: React.FC = () => {
 
     setSyncStatus('syncing');
     if (syncTimeout.current) clearTimeout(syncTimeout.current);
-    
+
     const performSync = async (): Promise<boolean> => {
       flushPendingSyncRef.current = null;
-      let gSuccess = true;
-      let oSuccess = true;
+      if (isLoggingOutRef.current || activeSessionKeyRef.current !== sessionKey || !isHydrated.current) {
+        return false;
+      }
 
       const oldOutletData: Record<string, any> = {};
       Object.keys(changedMonths).forEach(monthKey => {
@@ -1774,14 +1832,18 @@ const App: React.FC = () => {
       const isPriority = isPrioritySync.current;
       isPrioritySync.current = false;
 
-      oSuccess = await saveOutletData(
-        user.email, 
-        user.selectedOutlet!, 
-        changedMonths, 
+      const oSuccess = await saveOutletData(
+        sessionEmail,
+        sessionOutlet,
+        changedMonths,
         oldOutletData,
         globalChanged ? changedGlobalFields : undefined,
         isPriority
       );
+
+      if (activeSessionKeyRef.current !== sessionKey || isLoggingOutRef.current) {
+        return oSuccess;
+      }
 
       if (oSuccess) {
         if (globalChanged) {
@@ -1796,14 +1858,12 @@ const App: React.FC = () => {
         }
         setSyncStatus('online');
         persistSyncedHashes();
-        
+
         // Clear pending items on successful database confirmation
         try {
-          const emailKey = user.email!.toLowerCase();
-          const outletKey = user.selectedOutlet!;
-          safeStorage.removeItem(`PENDING_SYNC_GLOBAL_${emailKey}_${outletKey}`);
-          safeStorage.removeItem(`PENDING_SYNC_OUTLET_${emailKey}_${outletKey}`);
-          safeStorage.setItem(`HAS_PENDING_SYNC_${emailKey}_${outletKey}`, 'false');
+          safeStorage.removeItem(`PENDING_SYNC_GLOBAL_${sessionEmail}_${sessionOutlet}`);
+          safeStorage.removeItem(`PENDING_SYNC_OUTLET_${sessionEmail}_${sessionOutlet}`);
+          safeStorage.setItem(`HAS_PENDING_SYNC_${sessionEmail}_${sessionOutlet}`, 'false');
         } catch (e) {
           // Ignore
         }
@@ -1911,38 +1971,40 @@ const App: React.FC = () => {
   }, [user.isLoggedIn, user.email, user.selectedOutlet]);
 
   useEffect(() => {
-    if (!user.isLoggedIn || !user.email || !user.selectedOutlet) return;
+    const sessionEmail = (user.email || '').trim().toLowerCase();
+    const sessionOutlet = normalizeOutletKey(user.selectedOutlet);
+    if (!user.isLoggedIn || !sessionEmail || !sessionOutlet || sessionOutlet === 'ALL' || sessionOutlet === 'SEMUA OUTLET') return;
+    const sessionKey = `${sessionEmail}::${sessionOutlet}`;
+
     const unsubscribe = startRealtimeListener(
-      user.email, 
-      user.selectedOutlet,
+      sessionEmail,
+      sessionOutlet,
       (newData) => {
-        const { staffList, leaveRecords, dailyOvertime, dailyAttendance, dailyExternalAudit, dailyCPA, guestComplaints, affiliateHistory, ...rest } = newData;
-        
-        const globalFields = ['staffList', 'leaveRecords', 'dailyOvertime', 'dailyAttendance', 'dailyExternalAudit', 'dailyCPA', 'guestComplaints', 'affiliateHistory'];
+        if (isLoggingOutRef.current || activeSessionKeyRef.current !== sessionKey) return;
+        const { staffList, leaveRecords, dailyOvertime, weeklyOvertime, dailyAttendance, dailyExternalAudit, dailyCPA, dailyGSI, guestComplaints, affiliateHistory, manpowerData, ...rest } = newData;
+
+        const globalFields = ['staffList', 'leaveRecords', 'dailyOvertime', 'weeklyOvertime', 'dailyAttendance', 'dailyExternalAudit', 'dailyCPA', 'dailyGSI', 'guestComplaints', 'affiliateHistory', 'manpowerData'];
 
         setGlobalDataState(prev => {
           let hasChange = false;
-          const nextGlobal = { ...prev };
+          const nextGlobal: any = { ...prev, outlet: sessionOutlet };
 
           globalFields.forEach(field => {
             const cloudVal = newData[field];
             if (cloudVal === undefined) return;
 
             const cloudHash = JSON.stringify(cloudVal);
-            const localHash = JSON.stringify(prev[field]);
+            const localHash = JSON.stringify((prev as any)[field]);
 
             const lastSyncedHash = lastSyncedGlobal.current[field];
             const isLocalDirty = lastSyncedHash !== undefined && localHash !== lastSyncedHash;
 
             if (cloudHash !== lastSyncedHash) {
               if (!isLocalDirty) {
-                // Local state is clean/in sync with last known server state: adopt server state 100% to handle deletions, modifications, etc.
                 nextGlobal[field] = cloudVal;
                 lastSyncedGlobal.current[field] = cloudHash;
                 hasChange = true;
               }
-              // If local state is dirty (has uncommitted edits/deletions), do NOT merge old cloud data over it,
-              // as that resurrects deleted records! Local changes will sync to server authoritatively.
             }
           });
 
@@ -1952,20 +2014,19 @@ const App: React.FC = () => {
               : (typeof nextGlobal.staffList === 'object' ? Object.values(nextGlobal.staffList) : []);
             const seen = new Set();
             nextGlobal.staffList = rawStaff
-              .filter((s: any) => s && typeof s === 'object')
+              .filter((s: any) => s && typeof s === 'object' && (!s.outlet || normalizeOutletKey(s.outlet) === sessionOutlet))
               .sort(sortStaffList)
               .filter((s: any) => {
                 if (s.id && seen.has(s.id)) return false;
                 if (s.id) seen.add(s.id);
                 return true;
-              });
+              })
+              .map((s: any) => ({ ...s, outlet: sessionOutlet }));
           }
 
           if (hasChange) {
             try {
-              const emailKey = user.email!.toLowerCase();
-              const outletKey = user.selectedOutlet!;
-              safeStorage.setItem(`BARN_LAST_SYNCED_GLOBAL_${emailKey}_${outletKey}`, JSON.stringify(lastSyncedGlobal.current));
+              safeStorage.setItem(`BARN_LAST_SYNCED_GLOBAL_${sessionEmail}_${sessionOutlet}`, JSON.stringify(lastSyncedGlobal.current));
             } catch (e) {
               // Ignore
             }
@@ -1979,13 +2040,11 @@ const App: React.FC = () => {
           const nextOutlet = { ...prev };
 
           Object.keys(rest).forEach(monthKey => {
-            // Only process valid numeric month keys 0..11
             if (isNaN(parseInt(monthKey, 10)) || parseInt(monthKey, 10) < 0 || parseInt(monthKey, 10) > 11) return;
 
             let cloudVal = rest[monthKey];
             if (cloudVal === undefined) return;
 
-            // Clean old/uninputted default logistics items permanently
             if (cloudVal.logisticItems) {
               cloudVal = {
                 ...cloudVal,
@@ -2001,12 +2060,10 @@ const App: React.FC = () => {
 
             if (cloudHash !== lastSyncedHash) {
               if (!isLocalDirty) {
-                // Local state is clean: overwrite month data entirely to respect additions, edits, and deletions
                 nextOutlet[monthKey] = cloudVal;
                 lastSyncedOutlet.current[monthKey] = cloudHash;
                 hasChange = true;
               } else {
-                // Local state is partially dirty: perform smart field-level merge like a spreadsheet
                 let lastSyncedMonthObj: any = {};
                 try {
                   if (lastSyncedHash) lastSyncedMonthObj = JSON.parse(lastSyncedHash);
@@ -2025,7 +2082,6 @@ const App: React.FC = () => {
                   const localFHash = JSON.stringify(localF);
                   const lastSyncedFHash = JSON.stringify(lastSyncedF);
 
-                  // If user did not modify this particular feature, adopt the cloud update immediately
                   if (cloudFHash !== lastSyncedFHash) {
                     if (localFHash === lastSyncedFHash || lastSyncedFHash === undefined) {
                       mergedMonth[fKey] = cloudF;
@@ -2045,9 +2101,7 @@ const App: React.FC = () => {
 
           if (hasChange) {
             try {
-              const emailKey = user.email!.toLowerCase();
-              const outletKey = user.selectedOutlet!;
-              safeStorage.setItem(`BARN_LAST_SYNCED_OUTLET_${emailKey}_${outletKey}`, JSON.stringify(lastSyncedOutlet.current));
+              safeStorage.setItem(`BARN_LAST_SYNCED_OUTLET_${sessionEmail}_${sessionOutlet}`, JSON.stringify(lastSyncedOutlet.current));
             } catch (e) {
               // Ignore
             }
@@ -2478,7 +2532,9 @@ const App: React.FC = () => {
       safeStorage.removeItem('BARN_USER_PHOTO');
       safeStorage.removeItem('BARN_USER_NAME');
 
-      // 4. Immediately reset state so LoginModule renders cleanly on the very first click
+      // 4. Immediately reset state so LoginModule renders cleanly with zero outlet data retained
+      resetOutletSessionState();
+      setAllOutletsData({});
       setIsPublicView(false);
       setUser({ email: '', isLoggedIn: false, selectedOutlet: undefined, photoURL: undefined, displayName: undefined });
       setIsAdmin(false);
@@ -2512,22 +2568,9 @@ const App: React.FC = () => {
   };
 
   const loadPublicData = async () => {
-    setIsRefreshing(true);
-    try {
-      const cloudData = await fetchUserData('public@dashboard.com', 'SH THE BARN');
-
-      if (cloudData) {
-        const { staffList, ...rest } = cloudData;
-        if (Array.isArray(staffList)) {
-          setGlobalDataState(prev => ({ ...prev, staffList }));
-        }
-        setOutletMonthlyData(rest || {});
-      }
-    } catch (err) {
-      console.warn('[loadPublicData] Failed to load public data:', err);
-    } finally {
-      setIsRefreshing(false);
-    }
+    // Public / Regional view relies exclusively on allOutletsData and must never seed single-outlet data
+    resetOutletSessionState();
+    setIsRefreshing(false);
   };
 
   useEffect(() => {
@@ -2549,7 +2592,7 @@ const App: React.FC = () => {
       .then(initialData => {
         if (!isMounted) return;
         if (initialData && Object.keys(initialData).length > 0) {
-          setAllOutletsData(prev => ({ ...initialData, ...prev }));
+          setAllOutletsData(initialData);
           setSyncStatus('online');
         }
       })
@@ -2860,7 +2903,7 @@ const App: React.FC = () => {
           />;
         case ModuleType.REGIONAL_REPORT:
           return <RegionalManagerModule 
-            data={currentData} 
+            data={user.isLoggedIn ? currentData : (INITIAL_STATE as AppState)} 
             allOutletsData={mergedAllOutletsData}
             isLoading={isAllOutletsLoading}
             selectedMonth={filters.month !== undefined && !isNaN(parseInt(filters.month)) ? parseInt(filters.month) : new Date().getMonth()}
@@ -2882,8 +2925,9 @@ const App: React.FC = () => {
               setSyncTrigger(prev => prev + 1);
             }}
             showToast={showToast}
-            onUpdate={updateCurrentData}
+            onUpdate={user.isLoggedIn ? updateCurrentData : undefined}
             selectedOutlet=""
+            activeUserOutlet={user.isLoggedIn ? user.selectedOutlet : undefined}
           />;
         case ModuleType.TUTORIAL:
           return <TutorialModule 

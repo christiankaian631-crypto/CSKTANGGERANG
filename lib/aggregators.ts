@@ -1,5 +1,5 @@
 import { AppState } from '../types';
-import { INITIAL_STATE } from '../constants';
+import { INITIAL_STATE, normalizeOutletKey } from '../constants';
 
 export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, currentGlobalData: any): AppState => {
   const allStaffMap: Record<string, any> = {};
@@ -57,20 +57,44 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
     return false;
   };
 
-  // 1. Seed with currentGlobalData's staff if available and not placeholder
-  if (currentGlobalData) {
+  // Deduplicate allOutletsData canonically and skip deleted outlets
+  const dedupedOutlets: Record<string, any> = {};
+  if (allOutletsData && typeof allOutletsData === 'object') {
+    Object.entries(allOutletsData).forEach(([rawName, rawVal]) => {
+      if (!rawVal || typeof rawVal !== 'object' || rawVal.isDeleted) return;
+      const canonOutlet = normalizeOutletKey(rawName);
+      if (!canonOutlet || canonOutlet === 'ALL' || canonOutlet === 'SEMUA OUTLET') return;
+      const prev = dedupedOutlets[canonOutlet];
+      if (!prev) {
+        dedupedOutlets[canonOutlet] = rawVal;
+      } else {
+        const prevTs = prev._lastUpdated || prev.updatedAt || '';
+        const nextTs = rawVal._lastUpdated || rawVal.updatedAt || '';
+        if (nextTs && (!prevTs || nextTs >= prevTs)) {
+          dedupedOutlets[canonOutlet] = rawVal;
+        }
+      }
+    });
+  }
+
+  // 1. Seed with currentGlobalData ONLY when allOutletsData is empty (e.g., offline single-outlet fallback)
+  // to avoid double-counting or leaking active session data across outlets in Regional view.
+  if (currentGlobalData && Object.keys(dedupedOutlets).length === 0) {
+    const fallbackOutlet = normalizeOutletKey((currentGlobalData as any).outlet) || 'OUTLET';
     if (Array.isArray(currentGlobalData.staffList)) {
       currentGlobalData.staffList.forEach((staff: any) => {
         const sKey = staff.staffId || staff.id;
+        const staffOutlet = normalizeOutletKey(staff.outlet) || fallbackOutlet;
         if (!isPlaceholder(staff) && sKey) {
-          allStaffMap[sKey] = { ...staff };
+          allStaffMap[`${staffOutlet}::${sKey}`] = { ...staff, outlet: staffOutlet };
         }
       });
     }
     if (Array.isArray(currentGlobalData.leaveRecords)) {
       currentGlobalData.leaveRecords.forEach((record: any) => {
         if (record && record.id) {
-          allLeaveRecordsMap[record.id] = { ...record };
+          const recOutlet = normalizeOutletKey(record.outlet) || fallbackOutlet;
+          allLeaveRecordsMap[`${recOutlet}::${record.id}`] = { ...record, outlet: recOutlet };
         }
       });
     }
@@ -98,7 +122,7 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
     }
     if (Array.isArray(currentGlobalData.logisticItems)) {
       currentGlobalData.logisticItems.forEach((item: any) => {
-        if (item && item.id) aggregatedLogisticItemsMap[item.id] = { ...item };
+        if (item && item.id) aggregatedLogisticItemsMap[`${fallbackOutlet}::${item.id}`] = { ...item, outlet: item.outlet || fallbackOutlet };
       });
     }
     if (currentGlobalData.dailyLogisticRecords) {
@@ -151,9 +175,9 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
     }
   }
 
-  // 2. Iterate over each outlet in allOutletsData
-  if (allOutletsData && typeof allOutletsData === 'object') {
-    Object.entries(allOutletsData).forEach(([outletName, outletData]) => {
+  // 2. Iterate over each deduplicated canonical outlet in dedupedOutlets
+  if (Object.keys(dedupedOutlets).length > 0) {
+    Object.entries(dedupedOutlets).forEach(([outletName, outletData]) => {
       if (!outletData || typeof outletData !== 'object') return;
 
       if (outletData.manpowerData && typeof outletData.manpowerData === 'object') {
@@ -164,10 +188,11 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
       if (Array.isArray(outletData.staffList)) {
         outletData.staffList.forEach((staff: any) => {
           const sKey = staff.staffId || staff.id;
-          if (!isPlaceholder(staff) && sKey) {
-            allStaffMap[sKey] = {
+          const staffOutlet = staff.outlet ? normalizeOutletKey(staff.outlet) : outletName;
+          if (!isPlaceholder(staff) && sKey && staffOutlet === outletName) {
+            allStaffMap[`${outletName}::${sKey}`] = {
               ...staff,
-              outlet: staff.outlet || outletName
+              outlet: outletName
             };
           }
         });
@@ -177,9 +202,9 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
       if (Array.isArray(outletData.leaveRecords)) {
         outletData.leaveRecords.forEach((record: any) => {
           if (record && record.id) {
-            allLeaveRecordsMap[record.id] = {
+            allLeaveRecordsMap[`${outletName}::${record.id}`] = {
               ...record,
-              outlet: record.outlet || outletName
+              outlet: record.outlet ? normalizeOutletKey(record.outlet) : outletName
             };
           }
         });
@@ -188,8 +213,9 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
       // Root level complaints
       if (Array.isArray(outletData.guestComplaints)) {
         outletData.guestComplaints.forEach((c: any) => {
-          if (c && !aggregatedComplaints.some(ac => ac.id === c.id)) {
-            aggregatedComplaints.push({ ...c, outlet: c.outlet || outletName });
+          const cOutlet = c?.outlet ? normalizeOutletKey(c.outlet) : outletName;
+          if (c && !aggregatedComplaints.some(ac => ac.id === c.id && normalizeOutletKey(ac.outlet) === cOutlet)) {
+            aggregatedComplaints.push({ ...c, outlet: cOutlet });
           }
         });
       }
@@ -200,8 +226,8 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
           if (Array.isArray(arr)) {
             if (!dailyAttendance[dateStr]) dailyAttendance[dateStr] = [];
             arr.forEach((a: any) => {
-              const mapped = { ...a, outlet: a.outlet || outletName };
-              if (!dailyAttendance[dateStr].some(e => e.staffId === mapped.staffId)) {
+              const mapped = { ...a, outlet: a.outlet ? normalizeOutletKey(a.outlet) : outletName };
+              if (!dailyAttendance[dateStr].some(e => e.staffId === mapped.staffId && normalizeOutletKey(e.outlet) === mapped.outlet)) {
                 dailyAttendance[dateStr].push(mapped);
               }
             });
@@ -215,8 +241,8 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
           if (Array.isArray(arr)) {
             if (!dailyOvertime[dateStr]) dailyOvertime[dateStr] = [];
             arr.forEach((o: any) => {
-              const mapped = { ...o, outlet: o.outlet || outletName };
-              if (!dailyOvertime[dateStr].some(e => (e.id && e.id === mapped.id) || e.staffId === mapped.staffId)) {
+              const mapped = { ...o, outlet: o.outlet ? normalizeOutletKey(o.outlet) : outletName };
+              if (!dailyOvertime[dateStr].some(e => normalizeOutletKey(e.outlet) === mapped.outlet && ((e.id && e.id === mapped.id) || e.staffId === mapped.staffId))) {
                 dailyOvertime[dateStr].push(mapped);
               }
             });
@@ -227,7 +253,7 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
       // Root level logistics
       if (Array.isArray(outletData.logisticItems)) {
         outletData.logisticItems.forEach((item: any) => {
-          if (item && item.id) aggregatedLogisticItemsMap[item.id] = { ...item };
+          if (item && item.id) aggregatedLogisticItemsMap[`${outletName}::${item.id}`] = { ...item, outlet: item.outlet || outletName };
         });
       }
       if (outletData.dailyLogisticRecords) {
@@ -298,10 +324,11 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
         if (Array.isArray(mData.staffList)) {
           mData.staffList.forEach((staff: any) => {
             const sKey = staff.staffId || staff.id;
-            if (!isPlaceholder(staff) && sKey) {
-              allStaffMap[sKey] = {
+            const staffOutlet = staff.outlet ? normalizeOutletKey(staff.outlet) : outletName;
+            if (!isPlaceholder(staff) && sKey && staffOutlet === outletName) {
+              allStaffMap[`${outletName}::${sKey}`] = {
                 ...staff,
-                outlet: staff.outlet || outletName
+                outlet: outletName
               };
             }
           });
@@ -311,9 +338,9 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
         if (Array.isArray(mData.leaveRecords)) {
           mData.leaveRecords.forEach((record: any) => {
             if (record && record.id) {
-              allLeaveRecordsMap[record.id] = {
+              allLeaveRecordsMap[`${outletName}::${record.id}`] = {
                 ...record,
-                outlet: record.outlet || outletName
+                outlet: record.outlet ? normalizeOutletKey(record.outlet) : outletName
               };
             }
           });
@@ -325,8 +352,8 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
             if (Array.isArray(arr)) {
               if (!dailyAttendance[dateStr]) dailyAttendance[dateStr] = [];
               arr.forEach((a: any) => {
-                const mapped = { ...a, outlet: a.outlet || outletName };
-                if (!dailyAttendance[dateStr].some(e => e.staffId === mapped.staffId)) {
+                const mapped = { ...a, outlet: a.outlet ? normalizeOutletKey(a.outlet) : outletName };
+                if (!dailyAttendance[dateStr].some(e => e.staffId === mapped.staffId && normalizeOutletKey(e.outlet) === mapped.outlet)) {
                   dailyAttendance[dateStr].push(mapped);
                 }
               });
@@ -340,8 +367,8 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
             if (Array.isArray(arr)) {
               if (!dailyOvertime[dateStr]) dailyOvertime[dateStr] = [];
               arr.forEach((o: any) => {
-                const mapped = { ...o, outlet: o.outlet || outletName };
-                if (!dailyOvertime[dateStr].some(e => (e.id && e.id === mapped.id) || e.staffId === mapped.staffId)) {
+                const mapped = { ...o, outlet: o.outlet ? normalizeOutletKey(o.outlet) : outletName };
+                if (!dailyOvertime[dateStr].some(e => normalizeOutletKey(e.outlet) === mapped.outlet && ((e.id && e.id === mapped.id) || e.staffId === mapped.staffId))) {
                   dailyOvertime[dateStr].push(mapped);
                 }
               });
@@ -350,7 +377,7 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
         }
 
         // Track added records to avoid duplicate addition from multiple references
-        const salesSource = mData.sales?.dailyRecording || mData.dailyRecording || outletData.sales?.dailyRecording || outletData.dailyRecording;
+        const salesSource = mData.sales?.dailyRecording || mData.dailyRecording;
         if (salesSource && typeof salesSource === 'object') {
           Object.entries(salesSource).forEach(([dateStr, dSales]: [string, any]) => {
             if (!dSales) return;
@@ -418,7 +445,7 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
         }
 
         // Aggregate Expenses
-        const expSource = mData.expenses || outletData.expenses;
+        const expSource = mData.expenses;
         if (expSource && typeof expSource === 'object') {
           Object.entries(expSource).forEach(([dateStr, exp]: [string, any]) => {
             if (!exp) return;
@@ -551,7 +578,7 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
 
         if (Array.isArray(mData.logisticItems)) {
           mData.logisticItems.forEach((item: any) => {
-            if (item && item.id) aggregatedLogisticItemsMap[item.id] = { ...item };
+            if (item && item.id) aggregatedLogisticItemsMap[`${outletName}::${item.id}`] = { ...item, outlet: item.outlet || outletName };
           });
         }
         if (mData.dailyLogisticRecords) {
@@ -593,24 +620,140 @@ export const buildAggregatedGlobalData = (allOutletsData: Record<string, any>, c
           Object.assign(aggregatedDailyGSI, mData.dailyGSI);
         }
       }
+
+      // Root-level sales & expenses fallback if not already added via months
+      const rootSalesSource = outletData.sales?.dailyRecording || outletData.dailyRecording;
+      if (rootSalesSource && typeof rootSalesSource === 'object') {
+        Object.entries(rootSalesSource).forEach(([dateStr, dSales]: [string, any]) => {
+          if (!dSales) return;
+          const outletDateKey = `${outletName}_${dateStr}`;
+          if (outletSalesAdded.has(outletDateKey)) return;
+          outletSalesAdded.add(outletDateKey);
+          if (!aggregatedDailyRecording[dateStr]) {
+            aggregatedDailyRecording[dateStr] = {
+              date: dateStr,
+              revenue: 0, covers: 0, dineInRevenue: 0, takeAwayRevenue: 0,
+              goFoodRevenue: 0, grabFoodRevenue: 0, lunchRevenue: 0, dinnerRevenue: 0,
+              discLunchPakYudi: 0, discDinnerPakYudi: 0, discLunchInvestor: 0, discDinnerInvestor: 0,
+              discLunchInvestor2: 0, discDinnerInvestor2: 0, discLunchInvestor3: 0, discDinnerInvestor3: 0,
+              discManagementRevenue: 0, bankMegaRevenueLunch: 0, bankMegaRevenueDinner: 0,
+              digibankRevenueLunch: 0, digibankRevenueDinner: 0, membershipRevenueLunch: 0, membershipRevenueDinner: 0,
+              customerSatRevenue: 0, totalDiscount: 0,
+            };
+          }
+          const agg = aggregatedDailyRecording[dateStr];
+          agg.revenue += (Number(dSales.revenue) || 0);
+          agg.covers += (Number(dSales.covers) || 0);
+          agg.dineInRevenue += (Number(dSales.dineInRevenue) || 0);
+          agg.takeAwayRevenue += (Number(dSales.takeAwayRevenue) || 0);
+          agg.goFoodRevenue += (Number(dSales.goFoodRevenue) || 0);
+          agg.grabFoodRevenue += (Number(dSales.grabFoodRevenue) || 0);
+          agg.lunchRevenue += (Number(dSales.lunchRevenue) || 0);
+          agg.dinnerRevenue += (Number(dSales.dinnerRevenue) || 0);
+          agg.discLunchPakYudi += (Number(dSales.discLunchPakYudi) || 0);
+          agg.discDinnerPakYudi += (Number(dSales.discDinnerPakYudi) || 0);
+          agg.discLunchInvestor += (Number(dSales.discLunchInvestor) || 0);
+          agg.discDinnerInvestor += (Number(dSales.discDinnerInvestor) || 0);
+          agg.discLunchInvestor2 += (Number(dSales.discLunchInvestor2) || 0);
+          agg.discDinnerInvestor2 += (Number(dSales.discDinnerInvestor2) || 0);
+          agg.discLunchInvestor3 += (Number(dSales.discLunchInvestor3) || 0);
+          agg.discDinnerInvestor3 += (Number(dSales.discDinnerInvestor3) || 0);
+          agg.discManagementRevenue += (Number(dSales.discManagementRevenue) || 0);
+          agg.bankMegaRevenueLunch += (Number(dSales.bankMegaRevenueLunch) || 0);
+          agg.bankMegaRevenueDinner += (Number(dSales.bankMegaRevenueDinner) || 0);
+          agg.digibankRevenueLunch += (Number(dSales.digibankRevenueLunch) || 0);
+          agg.digibankRevenueDinner += (Number(dSales.digibankRevenueDinner) || 0);
+          agg.membershipRevenueLunch += (Number(dSales.membershipRevenueLunch) || 0);
+          agg.membershipRevenueDinner += (Number(dSales.membershipRevenueDinner) || 0);
+          agg.customerSatRevenue += (Number(dSales.customerSatRevenue) || 0);
+          agg.totalDiscount += (Number(dSales.totalDiscount) || 0);
+        });
+      }
+
+      if (outletData.expenses && typeof outletData.expenses === 'object') {
+        Object.entries(outletData.expenses).forEach(([dateStr, exp]: [string, any]) => {
+          if (!exp) return;
+          const outletDateKey = `${outletName}_${dateStr}`;
+          if (outletExpensesAdded.has(outletDateKey)) return;
+          outletExpensesAdded.add(outletDateKey);
+          if (!aggregatedExpenses[dateStr]) {
+            aggregatedExpenses[dateStr] = {
+              date: dateStr,
+              commodity: 0, nonCommodity: 0, asset: 0, atk: 0, casual: 0, maintenance: 0,
+              thirdParty: 0, cash: 0, cityLedger: 0, complimentary: 0, guestSatisfaction: 0,
+              chemical: 0, mainStore: 0, mainKitchen: 0, supplierExpense: 0, electricity: 0,
+              water: 0, gas: 0, elecLwbpOpen: 0, elecLwbpClose: 0, elecwbpOpen: 0, elecwbpClose: 0,
+              waterOpen: 0, waterClose: 0, gasOpen: 0, gasClose: 0, items: []
+            };
+          }
+          const aggE = aggregatedExpenses[dateStr];
+          aggE.commodity += (Number(exp.commodity) || 0);
+          aggE.nonCommodity += (Number(exp.nonCommodity) || 0);
+          aggE.asset += (Number(exp.asset) || 0);
+          aggE.atk += (Number(exp.atk) || 0);
+          aggE.casual += (Number(exp.casual) || 0);
+          aggE.maintenance += (Number(exp.maintenance) || 0);
+          aggE.thirdParty += (Number(exp.thirdParty) || 0);
+          aggE.cash += (Number(exp.cash) || 0);
+          aggE.cityLedger += (Number(exp.cityLedger) || 0);
+          aggE.complimentary += (Number(exp.complimentary) || 0);
+          aggE.guestSatisfaction += (Number(exp.guestSatisfaction) || 0);
+          aggE.chemical += (Number(exp.chemical) || 0);
+          aggE.mainStore += (Number(exp.mainStore) || 0);
+          aggE.mainKitchen += (Number(exp.mainKitchen) || 0);
+          aggE.supplierExpense += (Number(exp.supplierExpense) || 0);
+          aggE.electricity += (Number(exp.electricity) || 0);
+          aggE.water += (Number(exp.water) || 0);
+          aggE.gas += (Number(exp.gas) || 0);
+          aggE.elecLwbpOpen += (Number(exp.elecLwbpOpen) || 0);
+          aggE.elecLwbpClose += (Number(exp.elecLwbpClose) || 0);
+          aggE.elecwbpOpen += (Number(exp.elecwbpOpen) || 0);
+          aggE.elecwbpClose += (Number(exp.elecwbpClose) || 0);
+          aggE.waterOpen += (Number(exp.waterOpen) || 0);
+          aggE.waterClose += (Number(exp.waterClose) || 0);
+          aggE.gasOpen += (Number(exp.gasOpen) || 0);
+          aggE.gasClose += (Number(exp.gasClose) || 0);
+          if (Array.isArray(exp.items)) {
+            aggE.items.push(...exp.items.map((it: any) => ({ ...it, outlet: it.outlet || outletName })));
+          }
+        });
+      }
     });
   }
 
-  const activeStaffIds = new Set(Object.keys(allStaffMap));
+  const activeStaffCompositeKeys = new Set<string>();
+  const activeStaffRawIds = new Set<string>();
+  Object.values(allStaffMap).forEach((s: any) => {
+    const rawId = s?.staffId || s?.id;
+    const sOutlet = normalizeOutletKey(s?.outlet);
+    if (rawId) {
+      activeStaffRawIds.add(rawId);
+      if (sOutlet) activeStaffCompositeKeys.add(`${sOutlet}::${rawId}`);
+    }
+  });
+
+  const matchesActiveStaff = (rec: any) => {
+    if (!rec || !rec.staffId) return false;
+    const recOutlet = normalizeOutletKey(rec.outlet);
+    if (recOutlet) {
+      return activeStaffCompositeKeys.has(`${recOutlet}::${rec.staffId}`);
+    }
+    return activeStaffRawIds.has(rec.staffId);
+  };
 
   // Filter leave records to only active ones
-  const filteredLeaveRecords = Object.values(allLeaveRecordsMap).filter((r: any) => activeStaffIds.has(r.staffId));
+  const filteredLeaveRecords = Object.values(allLeaveRecordsMap).filter(matchesActiveStaff);
 
   // Filter daily attendance
   const filteredDailyAttendance: Record<string, any[]> = {};
   Object.entries(dailyAttendance).forEach(([dateStr, arr]) => {
-    filteredDailyAttendance[dateStr] = arr.filter((a: any) => activeStaffIds.has(a.staffId));
+    filteredDailyAttendance[dateStr] = arr.filter(matchesActiveStaff);
   });
 
   // Filter daily overtime
   const filteredDailyOvertime: Record<string, any[]> = {};
   Object.entries(dailyOvertime).forEach(([dateStr, arr]) => {
-    filteredDailyOvertime[dateStr] = arr.filter((o: any) => activeStaffIds.has(o.staffId));
+    filteredDailyOvertime[dateStr] = arr.filter(matchesActiveStaff);
   });
 
   let totalAggRev = 0;

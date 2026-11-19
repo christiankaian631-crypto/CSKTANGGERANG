@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
-import { OUTLETS, getAreaForOutlet, getActiveOutletNames } from '../constants';
+import { OUTLETS, getAreaForOutlet, getActiveOutletNames, findOutletData, normalizeOutletKey } from '../constants';
 import { AppState } from '../types';
 
 interface Props {
@@ -66,7 +66,7 @@ export const RegionalWeekdayWeekendRevenueTable: React.FC<Props> = ({
     const fromData = Object.keys(allOutletsData || {});
     const combined = Array.from(new Set([...fromConfig, ...fromData]));
     return combined.filter(name => {
-      const d = allOutletsData?.[name];
+      const d = findOutletData(allOutletsData, name);
       return !d || !d.isDeleted;
     });
   }, [allOutletsData]);
@@ -78,7 +78,8 @@ export const RegionalWeekdayWeekendRevenueTable: React.FC<Props> = ({
       list = list.filter(o => getAreaForOutlet(o) === activeArea);
     }
     if (activeOutlet !== 'ALL') {
-      list = list.filter(o => o === activeOutlet);
+      const canonActive = normalizeOutletKey(activeOutlet);
+      list = list.filter(o => normalizeOutletKey(o) === canonActive);
     }
     if (searchTerm.trim()) {
       const q = searchTerm.toLowerCase();
@@ -95,7 +96,7 @@ export const RegionalWeekdayWeekendRevenueTable: React.FC<Props> = ({
 
   // Helper: Extract single outlet daily values
   const getOutletDailyVal = (oName: string, dateStr: string, d: number) => {
-    const outletMonths = allOutletsData?.[oName] || allOutletsData?.[oName.trim()] || Object.entries(allOutletsData || {}).find(([k]) => k.trim().toUpperCase() === oName.trim().toUpperCase())?.[1] || {};
+    const outletMonths = findOutletData(allOutletsData, oName) || {};
     const mData = outletMonths[String(selectedMonth)] || outletMonths[selectedMonth] || outletMonths.monthlyData?.[String(selectedMonth)] || outletMonths.monthlyData?.[selectedMonth] || {};
     const sales = mData.sales || outletMonths.sales || mData || {};
     const dailyRec = sales.dailyRecording || mData.dailyRecording || outletMonths.dailyRecording || outletMonths.dailySales || {};

@@ -20,7 +20,7 @@ import { auth, db } from "../firebase";
 import { safeStorage } from "../lib/safeStorage";
 
 import { Notification, Outlet } from "../types";
-import { OUTLETS } from "../constants";
+import { OUTLETS, normalizeOutletKey } from "../constants";
 
 export enum OperationType {
   CREATE = 'create',
@@ -589,11 +589,16 @@ async function executeFirestoreWrite(
   dataToSave: Record<string, any>,
   extraGlobalToSave?: Record<string, any>
 ): Promise<boolean> {
+  const canonicalOutletId = normalizeOutletKey(outletId);
+  if (!canonicalOutletId || canonicalOutletId === 'ALL' || canonicalOutletId === 'SEMUA OUTLET') {
+    return false;
+  }
   if (!checkQuota() || !auth.currentUser) return false;
   try {
-    const outletRef = doc(db, COLLECTION_NAME, outletId);
+    const outletRef = doc(db, COLLECTION_NAME, canonicalOutletId);
     const completeMonthsToMerge: Record<string, any> = {};
     const payloadToMerge: Record<string, any> = {
+      outlet: canonicalOutletId,
       updatedAt: serverTimestamp(),
       lastUpdatedBy: (email || 'outlet-sync').toLowerCase(),
       isDeleted: false
@@ -604,7 +609,10 @@ async function executeFirestoreWrite(
       const mNum = parseInt(monthIdx, 10);
       if (isNaN(mNum) || mNum < 0 || mNum > 11 || !monthData) return;
       const { monthlyData: _ignored, ...cleanMonth } = cleanData(monthData);
-      completeMonthsToMerge[monthIdx] = cleanMonth;
+      completeMonthsToMerge[monthIdx] = {
+        ...cleanMonth,
+        outlet: canonicalOutletId
+      };
       hasData = true;
     });
 
@@ -621,7 +629,13 @@ async function executeFirestoreWrite(
       ];
       allowedGlobals.forEach(gKey => {
         if (extraGlobalToSave[gKey] !== undefined) {
-          payloadToMerge[gKey] = extraGlobalToSave[gKey];
+          if (gKey === 'staffList' && Array.isArray(extraGlobalToSave[gKey])) {
+            payloadToMerge[gKey] = extraGlobalToSave[gKey]
+              .filter((s: any) => s && (!s.outlet || normalizeOutletKey(s.outlet) === canonicalOutletId))
+              .map((s: any) => ({ ...s, outlet: canonicalOutletId }));
+          } else {
+            payloadToMerge[gKey] = extraGlobalToSave[gKey];
+          }
           hasData = true;
         }
       });
@@ -631,11 +645,11 @@ async function executeFirestoreWrite(
 
     // Direct atomic setDoc with merge: true - NO redundant getDoc read, saves 50% quota!
     await setDoc(outletRef, cleanData(payloadToMerge), { merge: true });
-    lastFirestoreWriteByOutlet[outletId] = Date.now();
-    console.log(`[CloudSync] Outlet data (${outletId}) successfully synced to Firestore.`);
+    lastFirestoreWriteByOutlet[canonicalOutletId] = Date.now();
+    console.log(`[CloudSync] Outlet data (${canonicalOutletId}) successfully synced to Firestore.`);
     return true;
   } catch (error) {
-    handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${outletId}`);
+    handleFirestoreError(error, OperationType.WRITE, `${COLLECTION_NAME}/${canonicalOutletId}`);
     return false;
   }
 }
@@ -648,19 +662,38 @@ export async function saveOutletData(
   extraGlobal?: Record<string, any>,
   isPriority: boolean = false
 ): Promise<boolean> {
+  const canonicalOutletId = normalizeOutletKey(outletId);
+  if (!canonicalOutletId || canonicalOutletId === 'ALL' || canonicalOutletId === 'SEMUA OUTLET') {
+    console.warn('[ServerSync] Blocked saveOutletData for invalid outletId:', outletId);
+    return false;
+  }
+
+  const sanitizedExtraGlobal = extraGlobal && typeof extraGlobal === 'object'
+    ? {
+        ...extraGlobal,
+        ...(Array.isArray(extraGlobal.staffList)
+          ? {
+              staffList: extraGlobal.staffList
+                .filter((s: any) => s && (!s.outlet || normalizeOutletKey(s.outlet) === canonicalOutletId))
+                .map((s: any) => ({ ...s, outlet: canonicalOutletId }))
+            }
+          : {})
+      }
+    : extraGlobal;
+
   // 1. Immediately save & synchronize to High-Availability Cloud Server API (instant cross-device sync)
   let serverSyncSuccess = false;
   try {
-    const res = await fetch(`/api/sync/outlet/${encodeURIComponent(outletId)}`, {
+    const res = await fetch(`/api/sync/outlet/${encodeURIComponent(canonicalOutletId)}`, {
       method: 'POST',
       headers: { 
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ data, email, extraGlobal })
+      body: JSON.stringify({ data, email, extraGlobal: sanitizedExtraGlobal })
     });
     if (res.ok) {
       serverSyncSuccess = true;
-      console.log(`[ServerSync] Outlet data (${outletId}) saved to cloud server for instant cross-device sync.`);
+      console.log(`[ServerSync] Outlet data (${canonicalOutletId}) saved to cloud server for instant cross-device sync.`);
     }
   } catch (err) {
     console.warn('[ServerSync] Server endpoint notice:', err);
@@ -668,50 +701,50 @@ export async function saveOutletData(
 
   // 2. Throttle and batch Firestore writes to protect daily token/quota
   const now = Date.now();
-  const lastWrite = lastFirestoreWriteByOutlet[outletId] || 0;
+  const lastWrite = lastFirestoreWriteByOutlet[canonicalOutletId] || 0;
   const timeSinceLast = now - lastWrite;
 
   // Accumulate pending payload
-  if (!pendingFirestorePayloadByOutlet[outletId]) {
-    pendingFirestorePayloadByOutlet[outletId] = { email, data: {}, extraGlobal: {} };
+  if (!pendingFirestorePayloadByOutlet[canonicalOutletId]) {
+    pendingFirestorePayloadByOutlet[canonicalOutletId] = { email, data: {}, extraGlobal: {} };
   }
-  pendingFirestorePayloadByOutlet[outletId].email = email;
-  pendingFirestorePayloadByOutlet[outletId].data = {
-    ...pendingFirestorePayloadByOutlet[outletId].data,
+  pendingFirestorePayloadByOutlet[canonicalOutletId].email = email;
+  pendingFirestorePayloadByOutlet[canonicalOutletId].data = {
+    ...pendingFirestorePayloadByOutlet[canonicalOutletId].data,
     ...data
   };
-  if (extraGlobal) {
-    pendingFirestorePayloadByOutlet[outletId].extraGlobal = {
-      ...pendingFirestorePayloadByOutlet[outletId].extraGlobal,
-      ...extraGlobal
+  if (sanitizedExtraGlobal) {
+    pendingFirestorePayloadByOutlet[canonicalOutletId].extraGlobal = {
+      ...pendingFirestorePayloadByOutlet[canonicalOutletId].extraGlobal,
+      ...sanitizedExtraGlobal
     };
   }
 
   let firestoreSuccess = false;
   // If high priority (e.g. deletion action) or throttle window elapsed, execute immediately
   if (isPriority || timeSinceLast >= FIRESTORE_MIN_WRITE_INTERVAL_MS) {
-    if (pendingFirestoreTimerByOutlet[outletId]) {
-      clearTimeout(pendingFirestoreTimerByOutlet[outletId]);
-      delete pendingFirestoreTimerByOutlet[outletId];
+    if (pendingFirestoreTimerByOutlet[canonicalOutletId]) {
+      clearTimeout(pendingFirestoreTimerByOutlet[canonicalOutletId]);
+      delete pendingFirestoreTimerByOutlet[canonicalOutletId];
     }
-    const payloadToExecute = pendingFirestorePayloadByOutlet[outletId];
-    delete pendingFirestorePayloadByOutlet[outletId];
+    const payloadToExecute = pendingFirestorePayloadByOutlet[canonicalOutletId];
+    delete pendingFirestorePayloadByOutlet[canonicalOutletId];
     firestoreSuccess = await executeFirestoreWrite(
       payloadToExecute.email,
-      outletId,
+      canonicalOutletId,
       payloadToExecute.data,
       payloadToExecute.extraGlobal
     );
   } else {
     // Within throttle window: schedule trailing write to execute once window expires
-    if (!pendingFirestoreTimerByOutlet[outletId]) {
+    if (!pendingFirestoreTimerByOutlet[canonicalOutletId]) {
       const delay = FIRESTORE_MIN_WRITE_INTERVAL_MS - timeSinceLast;
-      pendingFirestoreTimerByOutlet[outletId] = setTimeout(async () => {
-        delete pendingFirestoreTimerByOutlet[outletId];
-        const pending = pendingFirestorePayloadByOutlet[outletId];
+      pendingFirestoreTimerByOutlet[canonicalOutletId] = setTimeout(async () => {
+        delete pendingFirestoreTimerByOutlet[canonicalOutletId];
+        const pending = pendingFirestorePayloadByOutlet[canonicalOutletId];
         if (pending) {
-          delete pendingFirestorePayloadByOutlet[outletId];
-          await executeFirestoreWrite(pending.email, outletId, pending.data, pending.extraGlobal);
+          delete pendingFirestorePayloadByOutlet[canonicalOutletId];
+          await executeFirestoreWrite(pending.email, canonicalOutletId, pending.data, pending.extraGlobal);
         }
       }, delay);
     }
@@ -727,9 +760,10 @@ export async function saveUserData(email: string, data: any, outletId?: string):
   try {
     const globalSuccess = await saveGlobalData(email, data);
     let outletSuccess = true;
-    if (outletId) {
+    const canonicalOutletId = normalizeOutletKey(outletId);
+    if (canonicalOutletId && canonicalOutletId !== 'ALL' && canonicalOutletId !== 'SEMUA OUTLET') {
       const { staffList, leaveRecords, dailyOvertime, dailyMeetings, ...outletData } = data;
-      outletSuccess = await saveOutletData(email, outletId, outletData);
+      outletSuccess = await saveOutletData(email, canonicalOutletId, outletData);
     }
     return globalSuccess && outletSuccess;
   } catch (error) {
@@ -739,28 +773,31 @@ export async function saveUserData(email: string, data: any, outletId?: string):
 }
 
 export async function fetchUserData(email: string, outletId?: string): Promise<any | null> {
-  const cacheKey = `BARN_OFFLINE_CACHE_${email.toLowerCase()}_${outletId || 'ALL'}`;
+  const canonicalOutletId = normalizeOutletKey(outletId);
+  if (!canonicalOutletId || canonicalOutletId === 'ALL' || canonicalOutletId === 'SEMUA OUTLET') {
+    return {};
+  }
+
+  const cacheKey = `BARN_OFFLINE_CACHE_${email.toLowerCase()}_${canonicalOutletId}`;
   let combinedData: any = {};
 
   // 1. Fetch from high-speed Server Sync API (instant across devices)
-  if (outletId) {
-    try {
-      const sRes = await fetch(`/api/sync/outlet/${encodeURIComponent(outletId)}`);
-      if (sRes.ok) {
-        const sJson = await sRes.json();
-        if (sJson.outlet) {
-          combinedData = unpackOutletDocument(sJson.outlet);
-        }
+  try {
+    const sRes = await fetch(`/api/sync/outlet/${encodeURIComponent(canonicalOutletId)}`);
+    if (sRes.ok) {
+      const sJson = await sRes.json();
+      if (sJson.outlet && !sJson.outlet.isDeleted) {
+        combinedData = unpackOutletDocument(sJson.outlet);
       }
-    } catch (e) {
-      console.warn('[ServerSync] Server fetchUserData notice:', e);
     }
+  } catch (e) {
+    console.warn('[ServerSync] Server fetchUserData notice:', e);
   }
 
   // 2. Fetch from Firestore if quota allows and authenticated, then merge
-  if (outletId && checkQuota() && auth.currentUser) {
+  if (checkQuota() && auth.currentUser) {
     try {
-      const outletRef = doc(db, COLLECTION_NAME, outletId);
+      const outletRef = doc(db, COLLECTION_NAME, canonicalOutletId);
       let outletSnap;
       try {
         outletSnap = await getDocFromServer(outletRef);
@@ -768,12 +805,15 @@ export async function fetchUserData(email: string, outletId?: string): Promise<a
         outletSnap = await getDoc(outletRef);
       }
       if (outletSnap && outletSnap.exists()) {
-        const cloudData = unpackOutletDocument(outletSnap.data());
-        combinedData = mergeDeep(combinedData, cloudData);
+        const rawDoc = outletSnap.data();
+        if (!rawDoc?.isDeleted) {
+          const cloudData = unpackOutletDocument(rawDoc);
+          combinedData = mergeDeep(combinedData, cloudData);
+        }
       }
     } catch (e) {
       if (!isOfflineError(e)) {
-        handleFirestoreError(e, OperationType.GET, `${COLLECTION_NAME}/${outletId}`);
+        handleFirestoreError(e, OperationType.GET, `${COLLECTION_NAME}/${canonicalOutletId}`);
       }
     }
   }
@@ -800,6 +840,23 @@ export async function fetchAllOutletsData(): Promise<Record<string, any> | null>
   const cacheKey = "BARN_OFFLINE_CACHE_ALL_OUTLETS";
   const results: Record<string, any> = {};
 
+  const upsertCanonicalOutlet = (rawId: string, rawData: any, lastUpdatedVal: string | null) => {
+    if (!rawData || rawData.isDeleted) return;
+    const canonId = normalizeOutletKey(rawId);
+    if (!canonId || canonId === 'ALL' || canonId === 'SEMUA OUTLET') return;
+    const filled = unpackOutletDocument(rawData);
+    const existing = results[canonId];
+    if (!existing || (lastUpdatedVal && (!existing._lastUpdated || lastUpdatedVal >= existing._lastUpdated))) {
+      results[canonId] = {
+        ...filled,
+        outlet: canonId,
+        isDeleted: false,
+        _googleReview: rawData.googleReview || null,
+        _lastUpdated: lastUpdatedVal || existing?._lastUpdated || null
+      };
+    }
+  };
+
   // 1. Fetch from server-side sync API
   try {
     const sRes = await fetch('/api/sync/all-outlets');
@@ -807,14 +864,7 @@ export async function fetchAllOutletsData(): Promise<Record<string, any> | null>
       const sJson = await sRes.json();
       if (sJson.outlets && typeof sJson.outlets === 'object') {
         Object.entries(sJson.outlets).forEach(([id, data]: [string, any]) => {
-          if (!data) return;
-          const filled = unpackOutletDocument(data);
-          results[id] = {
-            ...filled,
-            isDeleted: false,
-            _googleReview: data.googleReview || null,
-            _lastUpdated: data.updatedAt || null
-          };
+          upsertCanonicalOutlet(id, data, data?.updatedAt || null);
         });
       }
     }
@@ -834,17 +884,8 @@ export async function fetchAllOutletsData(): Promise<Record<string, any> | null>
       }
       snap.forEach(docSnap => {
         const data = docSnap.data();
-        const filled = unpackOutletDocument(data);
-        const existing = results[docSnap.id];
-        const cloudUpdated = data.updatedAt?.toDate?.()?.toISOString() || null;
-        if (!existing || (cloudUpdated && (!existing._lastUpdated || cloudUpdated >= existing._lastUpdated))) {
-          results[docSnap.id] = {
-            ...filled,
-            isDeleted: false,
-            _googleReview: data.googleReview || null,
-            _lastUpdated: cloudUpdated || existing?._lastUpdated || null
-          };
-        }
+        const cloudUpdated = data?.updatedAt?.toDate?.()?.toISOString() || null;
+        upsertCanonicalOutlet(docSnap.id, data, cloudUpdated);
       });
     } catch (err) {
       handleFirestoreError(err, OperationType.LIST, COLLECTION_NAME);
@@ -869,6 +910,23 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
   let isSubscribed = true;
   let lastKnownHash = '';
   let lastKnownEtag = '';
+
+  const upsertIntoMap = (target: Record<string, any>, rawId: string, rawData: any, lastUpdatedVal: string | null) => {
+    if (!rawData || rawData.isDeleted) return;
+    const canonId = normalizeOutletKey(rawId);
+    if (!canonId || canonId === 'ALL' || canonId === 'SEMUA OUTLET') return;
+    const filled = unpackOutletDocument(rawData);
+    const existing = target[canonId];
+    if (!existing || (lastUpdatedVal && (!existing._lastUpdated || lastUpdatedVal >= existing._lastUpdated))) {
+      target[canonId] = {
+        ...filled,
+        outlet: canonId,
+        isDeleted: false,
+        _googleReview: rawData.googleReview || null,
+        _lastUpdated: lastUpdatedVal || existing?._lastUpdated || null
+      };
+    }
+  };
 
   // Function to poll and sync from server API with ETag & CDN efficiency
   const pollServerSync = async () => {
@@ -897,14 +955,7 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
         if (json.outlets && typeof json.outlets === 'object') {
           const processed: Record<string, any> = {};
           Object.entries(json.outlets).forEach(([id, data]: [string, any]) => {
-            if (!data) return;
-            const filled = unpackOutletDocument(data);
-            processed[id] = {
-              ...filled,
-              isDeleted: false,
-              _googleReview: data.googleReview || null,
-              _lastUpdated: data.updatedAt || null
-            };
+            upsertIntoMap(processed, id, data, data?.updatedAt || null);
           });
           const newHash = JSON.stringify(processed);
           if (newHash !== lastKnownHash) {
@@ -936,16 +987,11 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
     try {
       const colRef = collection(db, COLLECTION_NAME);
       unsubFirestore = onSnapshot(colRef, (snap) => {
-        const results: any = {};
+        const results: Record<string, any> = {};
         snap.forEach((docSnap) => {
           const data = docSnap.data();
-          const filled = unpackOutletDocument(data);
-          results[docSnap.id] = {
-            ...filled,
-            isDeleted: false,
-            _googleReview: data.googleReview || null,
-            _lastUpdated: data.updatedAt?.toDate?.()?.toISOString() || null
-          };
+          const updatedAtIso = data?.updatedAt?.toDate?.()?.toISOString() || null;
+          upsertIntoMap(results, docSnap.id, data, updatedAtIso);
         });
         const newHash = JSON.stringify(results);
         if (newHash !== lastKnownHash) {
@@ -981,15 +1027,16 @@ export function startRealtimeListener(
   onStatusChange?: (status: 'connected' | 'disconnected' | 'reconnecting') => void
 ) {
   let isSubscribed = true;
+  const canonicalOutletId = normalizeOutletKey(outletId);
 
   // Hanya mengambil data 1 kali saat halaman dibuka atau outletId berubah agar tidak menimpa ketikan
   const fetchData = async () => {
-    if (!isSubscribed) return;
+    if (!isSubscribed || !canonicalOutletId || canonicalOutletId === 'ALL' || canonicalOutletId === 'SEMUA OUTLET') return;
     try {
-      const res = await fetch(`/api/sync/outlet/${encodeURIComponent(outletId)}`);
+      const res = await fetch(`/api/sync/outlet/${encodeURIComponent(canonicalOutletId)}`);
       if (res.ok) {
         const json = await res.json();
-        if (json.outlet && isSubscribed) {
+        if (json.outlet && !json.outlet.isDeleted && isSubscribed) {
           const filled = unpackOutletDocument(json.outlet);
           onUpdate(filled);
           onStatusChange?.('connected');
@@ -1001,18 +1048,18 @@ export function startRealtimeListener(
     // Fallback: ambil 1 kali dari Firestore via getDoc
     if (checkQuota() && auth.currentUser) {
       try {
-        const outletRef = doc(db, COLLECTION_NAME, outletId);
+        const outletRef = doc(db, COLLECTION_NAME, canonicalOutletId);
         const snap = await getDoc(outletRef);
         if (snap.exists() && isSubscribed) {
           const docData = snap.data();
-          if (docData) {
+          if (docData && !docData.isDeleted) {
             const filledMonthlyData = unpackOutletDocument(docData);
             onUpdate(filledMonthlyData);
           }
         }
         onStatusChange?.('connected');
       } catch (error) {
-        handleFirestoreError(error, OperationType.GET, `${COLLECTION_NAME}/${outletId}`);
+        handleFirestoreError(error, OperationType.GET, `${COLLECTION_NAME}/${canonicalOutletId}`);
       }
     }
   };

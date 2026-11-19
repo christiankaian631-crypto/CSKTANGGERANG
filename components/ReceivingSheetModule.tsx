@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { AppState, LedgerItem, CustomSupplier } from '../types';
-import { getOrderScheduleForOutlet } from '../constants';
-import { safeStorage, safeWindow } from '../lib/safeStorage';
+import { getOrderScheduleForOutlet, normalizeOutletKey } from '../constants';
+import { safeStorage, safeWindow, setScopedStorageItem } from '../lib/safeStorage';
 import ShareActions from './ShareActions';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -750,12 +750,13 @@ const ReceivingSheetModule: React.FC<Props> = ({
     });
 
     try {
-      safeStorage.setItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(calcPercent));
-      safeStorage.setItem(`COGS_CLOSING_INV_${monthKey}`, String(inputEndingInv));
-      safeStorage.setItem(`COGS_OPENING_INV_${monthKey}`, String(inputBeginInv));
-      safeStorage.setItem(`COGS_RND_${monthKey}`, String(inputRnd));
-      safeStorage.setItem(`COGS_WRONG_MAKER_${monthKey}`, String(inputWrongMaker));
-      safeStorage.setItem(`COGS_MARKETING_KOL_${monthKey}`, String(inputMarketingKol));
+      const outletScope = normalizeOutletKey(selectedOutlet || data?.outlet);
+      setScopedStorageItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(calcPercent), outletScope);
+      setScopedStorageItem(`COGS_CLOSING_INV_${monthKey}`, String(inputEndingInv), outletScope);
+      setScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, String(inputBeginInv), outletScope);
+      setScopedStorageItem(`COGS_RND_${monthKey}`, String(inputRnd), outletScope);
+      setScopedStorageItem(`COGS_WRONG_MAKER_${monthKey}`, String(inputWrongMaker), outletScope);
+      setScopedStorageItem(`COGS_MARKETING_KOL_${monthKey}`, String(inputMarketingKol), outletScope);
     } catch (e) {}
 
     showToast?.(`Data Inventory, R&D, Wrong Maker, & Marketing (KOL) berhasil disimpan! Persentase Closing Inventory COGS diperbarui menjadi ${calcPercent}%.`, "success");

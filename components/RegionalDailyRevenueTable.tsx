@@ -2,7 +2,7 @@ import React, { useState, useMemo } from 'react';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { Outlet } from '../types';
-import { MONTHS, OUTLETS, getAreaForOutlet, getActiveOutletNames } from '../constants';
+import { MONTHS, OUTLETS, getAreaForOutlet, getActiveOutletNames, findOutletData, normalizeOutletKey } from '../constants';
 
 interface Props {
   data: Record<string, any>;
@@ -72,12 +72,12 @@ export const RegionalDailyRevenueTable: React.FC<Props> = ({
   const targetOutlets = useMemo(() => {
     const baseList = displayedOutlets && displayedOutlets.length > 0 
       ? displayedOutlets 
-      : Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !data?.[o]?.isDeleted) as Outlet[];
+      : Array.from(new Set([...getActiveOutletNames(), ...Object.keys(data || {})])).filter(o => !findOutletData(data, o)?.isDeleted) as Outlet[];
 
     return baseList.filter(outlet => {
       const area = getAreaForOutlet(outlet);
       if (internalArea !== 'ALL' && area !== internalArea) return false;
-      if (internalOutlet && internalOutlet !== 'ALL' && outlet !== internalOutlet) return false;
+      if (internalOutlet && internalOutlet !== 'ALL' && normalizeOutletKey(outlet) !== normalizeOutletKey(internalOutlet)) return false;
       if (searchOutlet.trim()) {
         const q = searchOutlet.toLowerCase();
         return outlet.toLowerCase().includes(q) || area.toLowerCase().includes(q);
@@ -140,7 +140,7 @@ export const RegionalDailyRevenueTable: React.FC<Props> = ({
   // Build aggregated matrix data
   const matrixData = useMemo(() => {
     const outletData = targetOutlets.map(outlet => {
-      const outletMonths = (data && (data as any)[outlet]) || {};
+      const outletMonths = findOutletData(data, outlet) || {};
 
       const dailyStats = days.map(day => {
         const dateStr = `${monthStr}-${String(day).padStart(2, '0')}`;

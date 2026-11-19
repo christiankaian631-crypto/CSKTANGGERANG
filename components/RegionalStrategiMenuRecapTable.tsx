@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { getStoredStrategyCatalog, DEFAULT_STRATEGY_MENU_CATALOG, getActiveOutletNames, getAreaForOutlet, MONTHS } from '../constants';
+import { getStoredStrategyCatalog, DEFAULT_STRATEGY_MENU_CATALOG, getActiveOutletNames, getAreaForOutlet, MONTHS, findOutletData, normalizeOutletKey } from '../constants';
 import { StrategyMenuItem } from '../types';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -67,8 +67,9 @@ export const RegionalStrategiMenuRecapTable: React.FC<Props> = ({
     if (selectedArea && selectedArea !== 'ALL') {
       list = list.filter(o => getAreaForOutlet(o) === selectedArea);
     }
-    if (selectedOutlet) {
-      list = list.filter(o => o === selectedOutlet);
+    if (selectedOutlet && selectedOutlet !== 'ALL') {
+      const canonSelected = normalizeOutletKey(selectedOutlet);
+      list = list.filter(o => normalizeOutletKey(o) === canonSelected);
     }
     if (searchOutlet.trim()) {
       list = list.filter(o => o.toLowerCase().includes(searchOutlet.toLowerCase()));
@@ -79,7 +80,7 @@ export const RegionalStrategiMenuRecapTable: React.FC<Props> = ({
   // Aggregate strategy performance per outlet
   const outletSummaries = useMemo(() => {
     return targetOutlets.map(outletName => {
-      const outletRoot = allOutletsData?.[outletName] || {};
+      const outletRoot = findOutletData(allOutletsData, outletName) || {};
       const mData = outletRoot[String(selectedMonth)] || outletRoot[selectedMonth] || {};
       const dailyStrategy = mData.dailyStrategy || outletRoot.dailyStrategy || {};
       const dailyRecording = mData.dailyRecording || outletRoot.dailyRecording || mData.sales?.dailyRecording || outletRoot.sales?.dailyRecording || {};
@@ -252,7 +253,7 @@ export const RegionalStrategiMenuRecapTable: React.FC<Props> = ({
     });
 
     targetOutlets.forEach(outletName => {
-      const outletRoot = allOutletsData?.[outletName] || {};
+      const outletRoot = findOutletData(allOutletsData, outletName) || {};
       const mData = outletRoot[String(selectedMonth)] || outletRoot[selectedMonth] || {};
       const dailyStrategy = mData.dailyStrategy || outletRoot.dailyStrategy || {};
 

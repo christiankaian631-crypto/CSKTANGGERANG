@@ -62,6 +62,38 @@ export const safeStorage = {
   }
 };
 
+export const normalizeStorageOutletScope = (outletName?: string | null): string => {
+  const raw = (outletName || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  if (!raw || raw === 'ALL' || raw === 'SEMUA OUTLET') return '';
+  if (raw === 'SH ALSUT' || raw === 'ALSUT' || raw === 'ALAM SUTERA' || raw === 'SH ALAM SUTERA') return 'SH_ALAM_SUTERA';
+  if (raw === 'BARN' || raw === 'THE BARN' || raw === 'SH BARN' || raw === 'SH THE BARN') return 'SH_THE_BARN';
+  if (raw === 'CIPETE' || raw === 'SH CIPETE') return 'SH_CIPETE';
+  if (raw === 'KEMANG' || raw === 'SH KEMANG') return 'SH_KEMANG';
+  if (raw === 'LEBAK BULUS' || raw === 'SH LEBAK BULUS') return 'SH_LEBAK_BULUS';
+  if (raw === 'BINTARO' || raw === 'SH BINTARO') return 'SH_BINTARO';
+  if (raw === 'BEKASI' || raw === 'SH BEKASI') return 'SH_BEKASI';
+  if (raw === 'CIBUBUR' || raw === 'SH CIBUBUR') return 'SH_CIBUBUR';
+  return raw.replace(/[^A-Z0-9]+/g, '_');
+};
+
+export const getOutletStorageKey = (baseKey: string, outletName?: string | null): string | null => {
+  const scope = normalizeStorageOutletScope(outletName);
+  if (!scope) return null;
+  return `${baseKey}__OUTLET_${scope}`;
+};
+
+export const getScopedStorageItem = (baseKey: string, outletName?: string | null): string | null => {
+  const scopedKey = getOutletStorageKey(baseKey, outletName);
+  if (!scopedKey) return null;
+  return safeStorage.getItem(scopedKey);
+};
+
+export const setScopedStorageItem = (baseKey: string, value: string, outletName?: string | null): void => {
+  const scopedKey = getOutletStorageKey(baseKey, outletName);
+  if (!scopedKey) return;
+  safeStorage.setItem(scopedKey, value);
+};
+
 export const safeSessionStorage = {
   getItem: (key: string): string | null => {
     try {

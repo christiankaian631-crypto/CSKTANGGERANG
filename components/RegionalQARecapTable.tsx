@@ -9,7 +9,8 @@ import {
   getActiveOutletNames,
   getActiveRegionalAreas,
   findOutletData,
-  getOutletMonthData
+  getOutletMonthData,
+  normalizeOutletKey
 } from '../constants';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
@@ -112,7 +113,8 @@ export const RegionalQARecapTable: React.FC<Props> = ({
     const activeAreas = getActiveRegionalAreas(activeNames);
     let list = [...activeNames];
     if (selectedOutlet && selectedOutlet !== 'ALL') {
-      list = list.filter(o => o === selectedOutlet);
+      const canonSelected = normalizeOutletKey(selectedOutlet);
+      list = list.filter(o => normalizeOutletKey(o) === canonSelected);
     } else if (activeAreaFilter !== 'ALL' && activeAreas[activeAreaFilter]) {
       list = activeAreas[activeAreaFilter];
     }
@@ -143,7 +145,11 @@ export const RegionalQARecapTable: React.FC<Props> = ({
         }
 
         // 2. If this is the active outlet in globalData
-        if (globalData && (globalData.outlet === outletName || !selectedOutlet)) {
+        if (
+          globalData &&
+          (globalData as any).outlet &&
+          normalizeOutletKey((globalData as any).outlet) === normalizeOutletKey(outletName)
+        ) {
           if (globalData.dailyQA) {
             Object.entries(globalData.dailyQA).forEach(([d, q]) => {
               if (d.startsWith(monthPrefix) && q) auditsMap[d] = q as QAData;

@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { AppState, Outlet, LedgerItem, MonthlyCogsData, DivisionAllocationItem, DivisionSupplierChannelShare } from '../types';
-import { ORDER_SCHEDULES_BY_AREA, getOrderScheduleForOutlet, getAreaForOutlet } from '../constants';
-import { safeStorage, safeClipboard } from '../lib/safeStorage';
+import { ORDER_SCHEDULES_BY_AREA, getOrderScheduleForOutlet, getAreaForOutlet, normalizeOutletKey } from '../constants';
+import { safeStorage, safeClipboard, getScopedStorageItem, setScopedStorageItem } from '../lib/safeStorage';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import jsPDF from 'jspdf';
@@ -137,13 +137,14 @@ export const getFallbackDivisionSupplierShare = (divId: string): DivisionSupplie
 export const CogsModule: React.FC<Props> = ({
   data,
   selectedDate,
-  selectedOutlet = 'SH THE BARN',
+  selectedOutlet = '',
   onUpdate,
   showToast,
   allMonthlyData,
   filterMonth,
   filterYear
 }) => {
+  const outletScope = normalizeOutletKey(selectedOutlet || data?.outlet);
   const currentDate = new Date();
   const initMonth = filterMonth !== undefined ? parseInt(filterMonth, 10) : currentDate.getMonth();
   const initYear = filterYear !== undefined ? parseInt(filterYear, 10) : currentDate.getFullYear();
@@ -193,21 +194,21 @@ export const CogsModule: React.FC<Props> = ({
   // 2. Budget Belanja Target % (e.g. 43.00%)
   const [targetBudgetPercent, setTargetBudgetPercent] = useState<number>(() => {
     if (savedCogsData.targetBudgetPercent !== undefined) return savedCogsData.targetBudgetPercent;
-    const local = safeStorage.getItem(`COGS_TARGET_BUDGET_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_TARGET_BUDGET_${monthKey}`, outletScope);
     return local ? parseFloat(local) : 43.0; // Default 43.00%
   });
 
   // 3. Opening Inventory (+)
   const [openingInventory, setOpeningInventory] = useState<number>(() => {
     if (savedCogsData.beginningInventory !== undefined) return savedCogsData.beginningInventory;
-    const local = safeStorage.getItem(`COGS_OPENING_INV_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, outletScope);
     return local ? parseFloat(local) : 0;
   });
 
   // 4. Closing Inventory % Input State (User now directly edits the percentage of closing inventory)
   const [closingInvPercent, setClosingInvPercent] = useState<number>(() => {
     if (savedCogsData.closingInventoryPercent !== undefined) return savedCogsData.closingInventoryPercent;
-    const localPercent = safeStorage.getItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`);
+    const localPercent = getScopedStorageItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, outletScope);
     if (localPercent !== null) {
       const p = parseFloat(localPercent);
       if (!isNaN(p)) return p;
@@ -217,32 +218,10 @@ export const CogsModule: React.FC<Props> = ({
 
   const [hasUserEditedClosingPercent, setHasUserEditedClosingPercent] = useState<boolean>(false);
 
-  useEffect(() => {
-    if (savedCogsData.endingInventory !== undefined && Number(savedCogsData.endingInventory) > 0) {
-      if (savedCogsData.closingInventoryPercent !== undefined) {
-        setClosingInvPercent(savedCogsData.closingInventoryPercent);
-      } else {
-        const localPercent = safeStorage.getItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`);
-        if (localPercent !== null) {
-          const p = parseFloat(localPercent);
-          if (!isNaN(p)) setClosingInvPercent(p);
-        }
-      }
-    } else if (savedCogsData.closingInventoryPercent !== undefined) {
-      setClosingInvPercent(savedCogsData.closingInventoryPercent);
-    } else {
-      const localPercent = safeStorage.getItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`);
-      if (localPercent !== null) {
-        const p = parseFloat(localPercent);
-        if (!isNaN(p)) setClosingInvPercent(p);
-      }
-    }
-  }, [monthKey, savedCogsData.closingInventoryPercent, savedCogsData.endingInventory]);
-
   // 5. Max Closing Inventory % (Default Max 11%)
   const [maxClosingInvPercent, setMaxClosingInvPercent] = useState<number>(() => {
     if (savedCogsData.maxClosingInvPercent !== undefined) return savedCogsData.maxClosingInvPercent;
-    const local = safeStorage.getItem(`COGS_MAX_CLOSING_PERCENT_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_MAX_CLOSING_PERCENT_${monthKey}`, outletScope);
     return local ? parseFloat(local) : 11.0;
   });
 
@@ -254,12 +233,57 @@ export const CogsModule: React.FC<Props> = ({
     return savedCogsData.manualMtdBelanja ? String(savedCogsData.manualMtdBelanja) : '';
   });
 
+  useEffect(() => {
+    if (savedCogsData.targetBudgetPercent !== undefined) {
+      setTargetBudgetPercent(savedCogsData.targetBudgetPercent);
+    } else {
+      const local = getScopedStorageItem(`COGS_TARGET_BUDGET_${monthKey}`, outletScope);
+      setTargetBudgetPercent(local ? parseFloat(local) : 43.0);
+    }
+
+    if (savedCogsData.beginningInventory !== undefined) {
+      setOpeningInventory(savedCogsData.beginningInventory);
+    } else {
+      const local = getScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, outletScope);
+      setOpeningInventory(local ? parseFloat(local) : 0);
+    }
+
+    if (savedCogsData.closingInventoryPercent !== undefined) {
+      setClosingInvPercent(savedCogsData.closingInventoryPercent);
+    } else {
+      const localPercent = getScopedStorageItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, outletScope);
+      const p = localPercent !== null ? parseFloat(localPercent) : NaN;
+      setClosingInvPercent(!isNaN(p) ? p : 10.0);
+    }
+
+    if (savedCogsData.maxClosingInvPercent !== undefined) {
+      setMaxClosingInvPercent(savedCogsData.maxClosingInvPercent);
+    } else {
+      const local = getScopedStorageItem(`COGS_MAX_CLOSING_PERCENT_${monthKey}`, outletScope);
+      setMaxClosingInvPercent(local ? parseFloat(local) : 11.0);
+    }
+
+    setUseManualMtdBelanja(Boolean(savedCogsData.useManualMtdBelanja));
+    setManualMtdBelanja(savedCogsData.manualMtdBelanja ? String(savedCogsData.manualMtdBelanja) : '');
+    setHasUserEditedClosingPercent(false);
+  }, [
+    outletScope,
+    monthKey,
+    savedCogsData.targetBudgetPercent,
+    savedCogsData.beginningInventory,
+    savedCogsData.closingInventoryPercent,
+    savedCogsData.endingInventory,
+    savedCogsData.maxClosingInvPercent,
+    savedCogsData.useManualMtdBelanja,
+    savedCogsData.manualMtdBelanja
+  ]);
+
   // 6. Divisional Allocation % dari Nominal Sisa Budget Belanja (Dapat Diatur Bebas Sesuai Keinginan)
   const [divisionAllocations, setDivisionAllocations] = useState<DivisionAllocationItem[]>(() => {
     if (savedCogsData.divisionAllocations && savedCogsData.divisionAllocations.length > 0) {
       return savedCogsData.divisionAllocations;
     }
-    const local = safeStorage.getItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`, outletScope);
     if (local) {
       try {
         const parsed = JSON.parse(local);
@@ -287,8 +311,24 @@ export const CogsModule: React.FC<Props> = ({
         { id: 'bar', name: 'Bar', percent: savedCogsData.barSharePercent ?? 20, color: 'amber', icon: 'fa-cocktail' },
         { id: 'service', name: 'Service', percent: savedCogsData.serviceSharePercent ?? 10, color: 'purple', icon: 'fa-concierge-bell' }
       ]);
+    } else {
+      const local = getScopedStorageItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`, outletScope);
+      if (local) {
+        try {
+          const parsed = JSON.parse(local);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setDivisionAllocations(parsed);
+            return;
+          }
+        } catch (e) {}
+      }
+      setDivisionAllocations([
+        { id: 'kitchen', name: 'Kitchen', percent: 70, color: 'blue', icon: 'fa-utensils' },
+        { id: 'bar', name: 'Bar', percent: 20, color: 'amber', icon: 'fa-cocktail' },
+        { id: 'service', name: 'Service', percent: 10, color: 'purple', icon: 'fa-concierge-bell' }
+      ]);
     }
-  }, [monthKey, savedCogsData.divisionAllocations, savedCogsData.kitchenSharePercent, savedCogsData.barSharePercent, savedCogsData.serviceSharePercent]);
+  }, [outletScope, monthKey, savedCogsData.divisionAllocations, savedCogsData.kitchenSharePercent, savedCogsData.barSharePercent, savedCogsData.serviceSharePercent]);
 
   const kitchenPercent = useMemo(() => divisionAllocations.find(d => d.id === 'kitchen')?.percent ?? 70, [divisionAllocations]);
   const barPercent = useMemo(() => divisionAllocations.find(d => d.id === 'bar')?.percent ?? 20, [divisionAllocations]);
@@ -394,7 +434,7 @@ export const CogsModule: React.FC<Props> = ({
     if (savedCogsData.divisionSupplierAllocations && Object.keys(savedCogsData.divisionSupplierAllocations).length > 0) {
       return savedCogsData.divisionSupplierAllocations;
     }
-    const local = safeStorage.getItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`, outletScope);
     if (local) {
       try {
         const parsed = JSON.parse(local);
@@ -410,7 +450,7 @@ export const CogsModule: React.FC<Props> = ({
     if (savedCogsData.divisionSupplierAllocations && Object.keys(savedCogsData.divisionSupplierAllocations).length > 0) {
       setDivisionSupplierAllocations(savedCogsData.divisionSupplierAllocations);
     } else {
-      const local = safeStorage.getItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`);
+      const local = getScopedStorageItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`, outletScope);
       if (local) {
         try {
           const parsed = JSON.parse(local);
@@ -424,7 +464,7 @@ export const CogsModule: React.FC<Props> = ({
       }
       setDivisionSupplierAllocations(DEFAULT_DIVISION_SUPPLIER_ALLOCATIONS);
     }
-  }, [monthKey, savedCogsData.divisionSupplierAllocations]);
+  }, [outletScope, monthKey, savedCogsData.divisionSupplierAllocations]);
 
   const [activeSupplierDivId, setActiveSupplierDivId] = useState<string>('kitchen');
   const [isSupplierBreakdownExpanded, setIsSupplierBreakdownExpanded] = useState<boolean>(false);
@@ -716,13 +756,13 @@ export const CogsModule: React.FC<Props> = ({
   // Strategi Rasio: % Percepatan (default 80%) & % Penyeimbang (default 20%) - DAPAT DIATUR MANUAL
   const [percepatanPercent, setPercepatanPercent] = useState<number>(() => {
     if (savedCogsData.strategyPercepatanPercent !== undefined) return savedCogsData.strategyPercepatanPercent;
-    const local = safeStorage.getItem(`COGS_STRATEGY_PERCEPATAN_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_STRATEGY_PERCEPATAN_${monthKey}`, outletScope);
     return local ? parseFloat(local) : 80;
   });
 
   const [penyeimbangPercent, setPenyeimbangPercent] = useState<number>(() => {
     if (savedCogsData.strategyPenyeimbangPercent !== undefined) return savedCogsData.strategyPenyeimbangPercent;
-    const local = safeStorage.getItem(`COGS_STRATEGY_PENYEIMBANG_${monthKey}`);
+    const local = getScopedStorageItem(`COGS_STRATEGY_PENYEIMBANG_${monthKey}`, outletScope);
     return local ? parseFloat(local) : 20;
   });
 
@@ -740,6 +780,34 @@ export const CogsModule: React.FC<Props> = ({
     if (savedCogsData.strategyManualDinnerPercent !== undefined) return savedCogsData.strategyManualDinnerPercent;
     return 60;
   });
+
+  useEffect(() => {
+    if (savedCogsData.strategyPercepatanPercent !== undefined) {
+      setPercepatanPercent(savedCogsData.strategyPercepatanPercent);
+    } else {
+      const local = getScopedStorageItem(`COGS_STRATEGY_PERCEPATAN_${monthKey}`, outletScope);
+      setPercepatanPercent(local ? parseFloat(local) : 80);
+    }
+
+    if (savedCogsData.strategyPenyeimbangPercent !== undefined) {
+      setPenyeimbangPercent(savedCogsData.strategyPenyeimbangPercent);
+    } else {
+      const local = getScopedStorageItem(`COGS_STRATEGY_PENYEIMBANG_${monthKey}`, outletScope);
+      setPenyeimbangPercent(local ? parseFloat(local) : 20);
+    }
+
+    setStrategyBasis(savedCogsData.strategyBasis || 'AUTO');
+    setManualLunchPercent(savedCogsData.strategyManualLunchPercent ?? 40);
+    setManualDinnerPercent(savedCogsData.strategyManualDinnerPercent ?? 60);
+  }, [
+    outletScope,
+    monthKey,
+    savedCogsData.strategyPercepatanPercent,
+    savedCogsData.strategyPenyeimbangPercent,
+    savedCogsData.strategyBasis,
+    savedCogsData.strategyManualLunchPercent,
+    savedCogsData.strategyManualDinnerPercent
+  ]);
 
   const handlePercepatanChange = (val: number) => {
     const p = Math.min(100, Math.max(0, val));
@@ -1869,9 +1937,9 @@ export const CogsModule: React.FC<Props> = ({
   ]);
 
   const handleSaveStrategy = () => {
-    safeStorage.setItem(`COGS_STRATEGY_TARGET_REV_${monthKey}`, String(strategyTargetRevenue));
-    safeStorage.setItem(`COGS_STRATEGY_PERCEPATAN_${monthKey}`, String(percepatanPercent));
-    safeStorage.setItem(`COGS_STRATEGY_PENYEIMBANG_${monthKey}`, String(penyeimbangPercent));
+    setScopedStorageItem(`COGS_STRATEGY_TARGET_REV_${monthKey}`, String(strategyTargetRevenue), outletScope);
+    setScopedStorageItem(`COGS_STRATEGY_PERCEPATAN_${monthKey}`, String(percepatanPercent), outletScope);
+    setScopedStorageItem(`COGS_STRATEGY_PENYEIMBANG_${monthKey}`, String(penyeimbangPercent), outletScope);
     const currentSaved = (data.monthlyCogsData || {})[monthKey] || {};
     const updatedMonthlyCogs: MonthlyCogsData = {
       ...currentSaved,
@@ -1940,8 +2008,8 @@ ${sc.isRecorded ? `- Realisasi Total Sales : Rp.${sc.actualTotal.toLocaleString(
 
   // Simpan Alokasi Persentase Sisa Budget Belanja Divisi
   const handleSaveDivisionAllocations = () => {
-    safeStorage.setItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionAllocations));
-    safeStorage.setItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionSupplierAllocations));
+    setScopedStorageItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionAllocations), outletScope);
+    setScopedStorageItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionSupplierAllocations), outletScope);
     const currentSaved = (data.monthlyCogsData || {})[monthKey] || {};
     const updatedMonthlyCogs: MonthlyCogsData = {
       ...currentSaved,
@@ -2005,13 +2073,13 @@ ${sc.isRecorded ? `- Realisasi Total Sales : Rp.${sc.actualTotal.toLocaleString(
       strategyTargetDate
     };
 
-    safeStorage.setItem(`COGS_TARGET_BUDGET_${monthKey}`, String(targetBudgetPercent));
-    safeStorage.setItem(`COGS_OPENING_INV_${monthKey}`, String(openingInventory));
-    safeStorage.setItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(closingInvPercent));
-    safeStorage.setItem(`COGS_CLOSING_INV_${monthKey}`, String(closingInventory));
-    safeStorage.setItem(`COGS_MAX_CLOSING_PERCENT_${monthKey}`, String(maxClosingInvPercent));
-    safeStorage.setItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionAllocations));
-    safeStorage.setItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionSupplierAllocations));
+    setScopedStorageItem(`COGS_TARGET_BUDGET_${monthKey}`, String(targetBudgetPercent), outletScope);
+    setScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, String(openingInventory), outletScope);
+    setScopedStorageItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(closingInvPercent), outletScope);
+    setScopedStorageItem(`COGS_CLOSING_INV_${monthKey}`, String(closingInventory), outletScope);
+    setScopedStorageItem(`COGS_MAX_CLOSING_PERCENT_${monthKey}`, String(maxClosingInvPercent), outletScope);
+    setScopedStorageItem(`COGS_DIVISION_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionAllocations), outletScope);
+    setScopedStorageItem(`COGS_DIV_SUPPLIER_ALLOCATIONS_${monthKey}`, JSON.stringify(divisionSupplierAllocations), outletScope);
 
     const newMonthlyCogsData = {
       ...(data.monthlyCogsData || {}),
@@ -2027,7 +2095,7 @@ ${sc.isRecorded ? `- Realisasi Total Sales : Rp.${sc.actualTotal.toLocaleString(
 
   // Submit Opening Inventory Only
   const handleSubmitOpeningInventory = () => {
-    safeStorage.setItem(`COGS_OPENING_INV_${monthKey}`, String(openingInventory));
+    setScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, String(openingInventory), outletScope);
     const currentSaved = (data.monthlyCogsData || {})[monthKey] || {};
     const updatedMonthlyCogs: MonthlyCogsData = {
       ...currentSaved,
@@ -2064,8 +2132,8 @@ ${sc.isRecorded ? `- Realisasi Total Sales : Rp.${sc.actualTotal.toLocaleString(
 
   // Submit Closing Inventory Only (now saves percentage and derived nominal)
   const handleSubmitClosingInventory = () => {
-    safeStorage.setItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(closingInvPercent));
-    safeStorage.setItem(`COGS_CLOSING_INV_${monthKey}`, String(closingInventory));
+    setScopedStorageItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(closingInvPercent), outletScope);
+    setScopedStorageItem(`COGS_CLOSING_INV_${monthKey}`, String(closingInventory), outletScope);
     const currentSaved = (data.monthlyCogsData || {})[monthKey] || {};
     const updatedMonthlyCogs: MonthlyCogsData = {
       ...currentSaved,
@@ -2102,9 +2170,9 @@ ${sc.isRecorded ? `- Realisasi Total Sales : Rp.${sc.actualTotal.toLocaleString(
 
   // Submit Both Opening & Closing Inventory
   const handleSubmitAllInventory = () => {
-    safeStorage.setItem(`COGS_OPENING_INV_${monthKey}`, String(openingInventory));
-    safeStorage.setItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(closingInvPercent));
-    safeStorage.setItem(`COGS_CLOSING_INV_${monthKey}`, String(closingInventory));
+    setScopedStorageItem(`COGS_OPENING_INV_${monthKey}`, String(openingInventory), outletScope);
+    setScopedStorageItem(`COGS_CLOSING_INV_PERCENT_${monthKey}`, String(closingInvPercent), outletScope);
+    setScopedStorageItem(`COGS_CLOSING_INV_${monthKey}`, String(closingInventory), outletScope);
     const currentSaved = (data.monthlyCogsData || {})[monthKey] || {};
     const updatedMonthlyCogs: MonthlyCogsData = {
       ...currentSaved,
