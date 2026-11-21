@@ -3,8 +3,9 @@ import { AppState, StrategyMenuItem, DailyStrategyRecord, Staff, StaffStrategyTa
 import { getStoredStrategyCatalog, getAreaForOutlet } from '../constants';
 import { resolveOutletManpowerData } from '../lib/manpowerUtils';
 import { safeStorage, safeWindow } from '../lib/safeStorage';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { getSystemConfigShared, isQuotaExceeded } from '../services/cloudService';
 import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import jsPDF from 'jspdf';
@@ -276,6 +277,21 @@ export const StrategiMenuModule: React.FC<Props> = ({
 
     const fetchCatalog = async () => {
       try {
+        const cfg = await getSystemConfigShared();
+        if (Array.isArray(cfg?.strategyCatalog) && cfg.strategyCatalog.length > 0) {
+          setCatalog(cfg.strategyCatalog);
+          try {
+            safeStorage.setItem('APP_STRATEGY_CATALOG', JSON.stringify(cfg.strategyCatalog));
+          } catch (e) {}
+          return;
+        }
+      } catch {}
+
+      if (isQuotaExceeded()) return;
+      try {
+        const lastFetch = parseInt(safeStorage.getItem('APP_STRATEGY_CATALOG_FETCH_AT') || '0', 10);
+        if (lastFetch && Date.now() - lastFetch < 10 * 60 * 1000) return;
+        safeStorage.setItem('APP_STRATEGY_CATALOG_FETCH_AT', String(Date.now()));
         const catRef = doc(db, 'system_config', 'strategy_catalog');
         const snap = await getDoc(catRef);
         if (snap.exists()) {
@@ -769,14 +785,6 @@ export const StrategiMenuModule: React.FC<Props> = ({
 
       onUpdate({ dailyStrategy: updatedDailyStrategy }, undefined, true);
 
-      try {
-        const outletDocRef = doc(db, 'dashboards', activeOutlet);
-        await setDoc(outletDocRef, {
-          dailyStrategy: updatedDailyStrategy,
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
-      } catch (err) {}
-
       showToast?.(`Data Strategi & Analisa Kontribusi tanggal ${selectedDate} berhasil disimpan!`, 'success');
     } catch (e) {
       console.error(e);
@@ -797,13 +805,6 @@ export const StrategiMenuModule: React.FC<Props> = ({
       const nextDaily = { ...(data.dailyStrategy || {}) };
       delete nextDaily[selectedDate];
       onUpdate({ dailyStrategy: nextDaily }, undefined, true);
-      try {
-        const outletDocRef = doc(db, 'dashboards', activeOutlet);
-        await setDoc(outletDocRef, {
-          dailyStrategy: nextDaily,
-          updatedAt: new Date().toISOString()
-        }, { merge: true });
-      } catch (err) {}
       showToast?.(`Data strategi tanggal ${selectedDate} berhasil dihapus.`, 'success');
     } catch (e) {
       console.error(e);

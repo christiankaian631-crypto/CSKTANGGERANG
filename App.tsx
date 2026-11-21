@@ -1,12 +1,12 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { ModuleType, AppState, User, SyncStatus, Outlet, Notification, LeaveRecord, CustomSupplier, Presence, PresenceEvent } from './types';
 import { INITIAL_STATE, ROLES_BY_DIVISION, DIVISIONS, OUTLETS, getActiveOutletNames, getStoredCustomSuppliers, normalizeOutletKey } from './constants';
-import { fetchUserData, saveGlobalData, saveOutletData, startRealtimeListener, startNotificationListener, isQuotaExceeded, resetQuotaExceeded, fetchAllOutletsData, startAllOutletsListener, testConnection } from './services/cloudService';
+import { fetchUserData, saveOutletData, startRealtimeListener, startNotificationListener, isQuotaExceeded, resetQuotaExceeded, fetchAllOutletsData, startAllOutletsListener, testConnection, getSystemConfigShared } from './services/cloudService';
 import { safeStorage, safeSessionStorage, safeClipboard, safeWindow } from './lib/safeStorage';
 import { toLocalDateStr } from './lib/dateUtils';
 import { calculateLeaveEntitlement } from './lib/staffUtils';
 import { auth, db } from './firebase';
-import { doc, getDoc, collection, getDocs, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { motion, AnimatePresence } from 'motion/react';
 import Header from './components/Header';
@@ -308,21 +308,11 @@ const App: React.FC = () => {
     setOutletMonthlyDataState({});
   }, []);
 
-  // Synchronize dynamic settings (like Batas Maksimal Input Harian) across users in real-time
+  // Synchronize dynamic settings (like Batas Maksimal Input Harian) across users via cached Server Config API (fallback to 1-time Firestore getDoc only if needed)
   useEffect(() => {
     if (!user.isLoggedIn || !user.email) return;
 
-    // Fetch from server API first
-    fetch('/api/sync/system-config')
-      .then(res => res.json())
-      .then(data => {
-        if (data?.config?.maxDailyInputs !== undefined) {
-          maxDailyInputLimitRef.current = data.config.maxDailyInputs;
-          safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.config.maxDailyInputs.toString());
-        }
-      })
-      .catch(() => {});
-
+    let isMounted = true;
     try {
       const saved = safeStorage.getItem('MAX_DAILY_INPUT_LIMIT');
       if (saved) maxDailyInputLimitRef.current = parseInt(saved, 10);
@@ -330,20 +320,32 @@ const App: React.FC = () => {
       // Ignore
     }
 
-    if (!auth.currentUser) return;
-
-    const configRef = doc(db, 'system_data', 'system_config');
-    getDoc(configRef).then((snapshot) => {
-      if (snapshot.exists()) {
-        const data = snapshot.data();
-        if (data.maxDailyInputs !== undefined) {
-          maxDailyInputLimitRef.current = data.maxDailyInputs;
-          safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
-        }
+    getSystemConfigShared().then((cfg) => {
+      if (!isMounted) return;
+      if (cfg?.maxDailyInputs !== undefined) {
+        maxDailyInputLimitRef.current = cfg.maxDailyInputs;
+        safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', cfg.maxDailyInputs.toString());
+        return;
       }
-    }).catch((error) => {
-      console.warn("[App] Could not fetch system config:", error);
-    });
+      if (auth.currentUser && !isQuotaExceeded()) {
+        const configRef = doc(db, 'system_data', 'system_config');
+        getDoc(configRef).then((snapshot) => {
+          if (isMounted && snapshot.exists()) {
+            const data = snapshot.data();
+            if (data.maxDailyInputs !== undefined) {
+              maxDailyInputLimitRef.current = data.maxDailyInputs;
+              safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
+            }
+          }
+        }).catch((error) => {
+          console.warn("[App] Could not fetch system config:", error);
+        });
+      }
+    }).catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
   }, [user.isLoggedIn, user.email]);
 
   const [filters, setFilters] = useState(() => {
@@ -514,7 +516,7 @@ const App: React.FC = () => {
     return unsubscribe;
   }, [user.isLoggedIn, syncTrigger]);
 
-  // Realtime Presence Tracker for Concurrent Online & Offline Users (Server + Non-Snapshot Firestore Poll, Zero onSnapshot)
+  // Realtime Presence Tracker for Concurrent Online & Offline Users (Server-only, ZERO Firestore reads/writes/snapshots)
   useEffect(() => {
     if (!(user.isLoggedIn && user.email) && !isPublicView) return;
 
@@ -533,7 +535,6 @@ const App: React.FC = () => {
     const userDisplayName = user.displayName || auth.currentUser?.displayName || safeStorage.getItem('BARN_USER_NAME') || (user.email ? user.email.split('@')[0] : (isPublicView ? `Pengunjung (${tabSessionId.slice(0, 4)})` : 'User'));
     const activeOutletLabel = user.selectedOutlet || (isPublicView ? 'REGIONAL VIEW' : 'SEMUA OUTLET');
 
-    const cloudPresenceMapRef = new Map<string, Presence>();
     let latestServerOnline: Presence[] = [];
     let latestServerOffline: Presence[] = [];
 
@@ -582,16 +583,8 @@ const App: React.FC = () => {
         }
       };
 
-      // 1. Server authoritative online & offline directory
       latestServerOnline.forEach(u => upsertUser(u, true));
       latestServerOffline.forEach(u => upsertUser(u, false));
-
-      // 2. Non-snapshot Firestore cross-origin presence (e.g. Dev URL <-> Shared URL)
-      cloudPresenceMapRef.forEach((u) => {
-        const ts = u.timestamp || parseTimestampMs(u.lastSeen) || 0;
-        const isOnlineCloud = u.status !== 'OFFLINE' && (now - ts) <= 45 * 1000;
-        upsertUser(u, isOnlineCloud);
-      });
 
       const mergedOnline = Array.from(onlineByEmail.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
       const mergedOffline = Array.from(offlineByEmail.values()).sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
@@ -683,6 +676,7 @@ const App: React.FC = () => {
 
     const sendHeartbeat = async () => {
       if (!myEmail) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
         await fetch('/api/presence', {
           method: 'POST',
@@ -698,24 +692,8 @@ const App: React.FC = () => {
       } catch (e) {}
     };
 
-    const sendCloudHeartbeat = async () => {
-      if (!myEmail || !auth.currentUser?.uid || isQuotaExceeded()) return;
-      try {
-        const pRef = doc(db, 'presence', auth.currentUser.uid);
-        await setDoc(pRef, {
-          uid: auth.currentUser.uid,
-          email: myEmail,
-          displayName: userDisplayName,
-          outlet: activeOutletLabel,
-          photoURL: userPhoto || '',
-          lastSeen: new Date().toISOString(),
-          timestamp: serverTimestamp(),
-          status: 'ONLINE'
-        }, { merge: true });
-      } catch {}
-    };
-
     const fetchServerPresence = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
         const res = await fetch('/api/presence');
         if (!res.ok) return;
@@ -727,43 +705,19 @@ const App: React.FC = () => {
       } catch {}
     };
 
-    const fetchCloudPresenceOnce = async () => {
-      if (isQuotaExceeded()) return;
-      try {
-        // Strictly getDocs (one-time poll, NEVER onSnapshot)
-        const snap = await getDocs(collection(db, 'presence'));
-        cloudPresenceMapRef.clear();
-        snap.forEach((docSnap) => {
-          const d = docSnap.data() as any;
-          const cleanEmail = (d?.email || '').toLowerCase().trim();
-          if (cleanEmail) {
-            const ts = parseTimestampMs(d.timestamp) || parseTimestampMs(d.lastSeen) || Date.now();
-            cloudPresenceMapRef.set(cleanEmail, {
-              uid: d.uid || docSnap.id,
-              email: cleanEmail,
-              displayName: d.displayName || cleanEmail.split('@')[0],
-              outlet: d.outlet || 'SEMUA OUTLET',
-              photoURL: d.photoURL || '',
-              lastSeen: d.lastSeen || new Date(ts).toISOString(),
-              lastOfflineAt: d.lastOfflineAt,
-              status: d.status === 'OFFLINE' ? 'OFFLINE' : 'ONLINE',
-              timestamp: ts
-            });
-          }
-        });
-        mergeAndPublishPresence([]);
-      } catch {}
-    };
-
     sendHeartbeat();
-    sendCloudHeartbeat();
     fetchServerPresence();
-    fetchCloudPresenceOnce();
 
-    const heartbeatTimer = setInterval(sendHeartbeat, 5000);
-    const cloudHeartbeatTimer = setInterval(sendCloudHeartbeat, 25000);
-    const pollTimer = setInterval(fetchServerPresence, 2000);
-    const cloudPollTimer = setInterval(fetchCloudPresenceOnce, 10000);
+    const heartbeatTimer = setInterval(sendHeartbeat, 8000);
+    const pollTimer = setInterval(fetchServerPresence, 4000);
+
+    const handleVisibilityPresence = () => {
+      if (document.visibilityState === 'visible') {
+        sendHeartbeat();
+        fetchServerPresence();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityPresence);
 
     const handleUnload = () => {
       if (!myEmail) return;
@@ -788,13 +742,12 @@ const App: React.FC = () => {
 
     return () => {
       clearInterval(heartbeatTimer);
-      clearInterval(cloudHeartbeatTimer);
       clearInterval(pollTimer);
-      clearInterval(cloudPollTimer);
+      document.removeEventListener('visibilitychange', handleVisibilityPresence);
       window.removeEventListener('beforeunload', handleUnload);
       window.removeEventListener('pagehide', handleUnload);
     };
-  }, [user.isLoggedIn, user.email, user.selectedOutlet, user.photoURL, user.displayName, auth.currentUser?.uid, isPublicView, enqueuePresencePopups]);
+  }, [user.isLoggedIn, user.email, user.selectedOutlet, user.photoURL, user.displayName, isPublicView, enqueuePresencePopups]);
   
   useEffect(() => {
     if (!Array.isArray(globalData.staffList)) return;
@@ -1703,12 +1656,10 @@ const App: React.FC = () => {
       }
     });
     
-    const [gSuccess, oSuccess] = await Promise.all([
-      saveGlobalData(user.email, globalToSync, oldGlobalData),
-      saveOutletData(user.email, user.selectedOutlet!, outletMonthlyData, oldOutletData, undefined, true)
-    ]);
+    // Single atomic outlet+global save (avoids duplicate writes to Firestore)
+    const oSuccess = await saveOutletData(user.email, user.selectedOutlet!, outletMonthlyData, oldOutletData, globalToSync, true);
     
-    if (gSuccess && oSuccess) {
+    if (oSuccess) {
       // Refresh all hashes on manual force sync
       globalFields.forEach(field => {
         lastSyncedGlobal.current[field] = JSON.stringify((globalData as any)[field]);
@@ -1880,7 +1831,7 @@ const App: React.FC = () => {
       isPrioritySync.current = false;
       performSync();
     } else {
-      syncTimeout.current = setTimeout(performSync, 1200);
+      syncTimeout.current = setTimeout(performSync, 3000);
     }
 
     return () => {
@@ -1948,15 +1899,18 @@ const App: React.FC = () => {
     };
   }, [user.isLoggedIn]);
 
-  // Auto-refresh when the app becomes visible/active again (especially useful on mobile browsers and tablets which suspend tabs)
+  // Auto-refresh from Server API (0 Firestore reads) when tab becomes visible, with cooldown
   useEffect(() => {
+    let lastVisibilityRefresh = 0;
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        // Automatically flush any uncommitted local inputs to prevent data loss
         if (flushPendingSyncRef.current) {
           flushPendingSyncRef.current().catch(() => {});
         }
-        fetchAllOutletsData().then(initialData => {
+        const now = Date.now();
+        if (now - lastVisibilityRefresh < 30000) return;
+        lastVisibilityRefresh = now;
+        fetchAllOutletsData({ skipFirestore: true }).then(initialData => {
           if (initialData && Object.keys(initialData).length > 0) {
             setAllOutletsData(prev => ({ ...prev, ...initialData }));
           }
@@ -2493,21 +2447,7 @@ const App: React.FC = () => {
       seenPresenceEventIdsRef.current.clear();
       lastPopupByTypeEmailRef.current.clear();
 
-      // 2. Instantly notify server & Firestore (without snapshot) to mark user Offline
-      if (loggingOutEmail && currentUid && !isQuotaExceeded()) {
-        setDoc(doc(db, 'presence', currentUid), {
-          uid: currentUid,
-          email: loggingOutEmail.toLowerCase(),
-          displayName: user.displayName || loggingOutEmail.split('@')[0],
-          outlet: user.selectedOutlet || 'SEMUA OUTLET',
-          photoURL: user.photoURL || '',
-          lastSeen: new Date().toISOString(),
-          lastOfflineAt: new Date().toISOString(),
-          timestamp: serverTimestamp(),
-          status: 'OFFLINE'
-        }, { merge: true }).catch(() => {});
-      }
-
+      // 2. Instantly notify Server API to mark user Offline (zero Firestore quota)
       if (loggingOutEmail) {
         const payload = JSON.stringify({ email: loggingOutEmail, uid: presenceKey, logoutAll: true });
         fetch(`/api/presence/logout?email=${encodeURIComponent(loggingOutEmail)}&uid=${encodeURIComponent(presenceKey)}&logoutAll=true`, {

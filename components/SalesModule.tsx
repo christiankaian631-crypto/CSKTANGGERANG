@@ -6,6 +6,7 @@ import { motion, AnimatePresence } from "motion/react";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../firebase";
 import { safeStorage } from "../lib/safeStorage";
+import { getSystemConfigShared, isQuotaExceeded } from "../services/cloudService";
 
 interface Props {
   data: SalesData;
@@ -151,17 +152,29 @@ const SalesModule: React.FC<Props> = ({
     const handlePromoChange = () => setPromoConfigVersion(v => v + 1);
     window.addEventListener('appPromoSettingsChanged', handlePromoChange);
 
-    // Ambil data 1 kali dari Firestore system_config/promo_settings saat halaman dibuka agar tidak menimpa ketikan
     const fetchPromoSettings = async () => {
       try {
+        const cfg = await getSystemConfigShared();
+        if (cfg?.promoSettings) {
+          try {
+            safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(cfg.promoSettings));
+          } catch {}
+          setPromoConfigVersion(v => v + 1);
+          return;
+        }
+      } catch {}
+
+      if (isQuotaExceeded()) return;
+      try {
+        const lastFetch = parseInt(safeStorage.getItem('APP_PROMO_SETTINGS_FETCH_AT') || '0', 10);
+        if (lastFetch && Date.now() - lastFetch < 10 * 60 * 1000) return;
+        safeStorage.setItem('APP_PROMO_SETTINGS_FETCH_AT', String(Date.now()));
         const promoDocRef = doc(db, 'system_config', 'promo_settings');
         const snap = await getDoc(promoDocRef);
         if (snap.exists()) {
           const d = snap.data();
           try {
-            if (typeof window !== 'undefined') {
-              safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(d));
-            }
+            safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(d));
           } catch (e) {}
           setPromoConfigVersion(v => v + 1);
         }

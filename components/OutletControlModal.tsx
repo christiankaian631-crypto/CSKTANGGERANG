@@ -19,6 +19,7 @@ import {
 import { doc, getDoc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { db } from '../firebase';
 import { safeStorage } from '../lib/safeStorage';
+import { getSystemConfigShared, updateSystemConfigShared, isQuotaExceeded } from '../services/cloudService';
 
 interface Props {
   isOpen: boolean;
@@ -147,95 +148,149 @@ export const OutletControlModal: React.FC<Props> = ({
   const [supplierNotesInput, setSupplierNotesInput] = useState('');
   const [supplierToDelete, setSupplierToDelete] = useState<CustomSupplier | null>(null);
 
-  // Load Firestore configurations once when modal opens
+  // Load configurations from cached Server API first; fallback to Firestore at most once per 10 mins if quota allows
   useEffect(() => {
     if (!isOpen) return;
 
     const fetchData = async () => {
-      try {
-        // 1. Fetch outlet_control
-        const outletDocRef = doc(db, 'system_config', 'outlet_control');
-        const outletSnap = await getDoc(outletDocRef);
-        if (outletSnap.exists()) {
-          const data = outletSnap.data();
-          if (Array.isArray(data.outlets) && data.outlets.length > 0) {
-            setOutletConfigs(data.outlets);
-            saveActiveOutletConfigs(data.outlets);
-            onOutletsChange?.(data.outlets);
-          }
-        }
-      } catch (err) {
-        console.warn('[OutletControl] Notice for outlet_control:', err);
-      }
+      let hasOutlets = false;
+      let hasPromo = false;
+      let hasStrat = false;
+      let hasSup = false;
+      let hasDeact = false;
 
       try {
-        // 2. Fetch promo_settings
-        const promoDocRef = doc(db, 'system_config', 'promo_settings');
-        const promoSnap = await getDoc(promoDocRef);
-        if (promoSnap.exists()) {
-          const data = promoSnap.data();
-          setPromoSettings(data as PromoSettings);
-          if (Array.isArray(data.customBankPromos) && data.customBankPromos.length > 0) {
-            setBankPromosList(data.customBankPromos);
+        const cfg = await getSystemConfigShared();
+        if (cfg) {
+          if (Array.isArray(cfg.outlets) && cfg.outlets.length > 0) {
+            hasOutlets = true;
+            setOutletConfigs(cfg.outlets);
+            saveActiveOutletConfigs(cfg.outlets);
+            onOutletsChange?.(cfg.outlets);
           }
-          try {
-            safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(data));
-            if (typeof window !== 'undefined') {
-              window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: data }));
+          if (cfg.promoSettings) {
+            hasPromo = true;
+            setPromoSettings(cfg.promoSettings as PromoSettings);
+            if (Array.isArray(cfg.promoSettings.customBankPromos) && cfg.promoSettings.customBankPromos.length > 0) {
+              setBankPromosList(cfg.promoSettings.customBankPromos);
             }
-          } catch (e) {}
-        }
-      } catch (err) {
-        console.warn('[OutletControl] Notice for promo_settings:', err);
-      }
-
-      try {
-        // 3. Fetch strategy_catalog
-        const stratDocRef = doc(db, 'system_config', 'strategy_catalog');
-        const stratSnap = await getDoc(stratDocRef);
-        if (stratSnap.exists()) {
-          const data = stratSnap.data();
-          if (Array.isArray(data.items) && data.items.length > 0) {
-            setStrategyCatalog(data.items);
-            saveStoredStrategyCatalog(data.items);
+            try {
+              safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(cfg.promoSettings));
+              window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: cfg.promoSettings }));
+            } catch {}
+          }
+          if (Array.isArray(cfg.strategyCatalog) && cfg.strategyCatalog.length > 0) {
+            hasStrat = true;
+            setStrategyCatalog(cfg.strategyCatalog);
+            saveStoredStrategyCatalog(cfg.strategyCatalog);
+          }
+          if (Array.isArray(cfg.customSuppliers) && cfg.customSuppliers.length > 0) {
+            hasSup = true;
+            setCustomSuppliers(cfg.customSuppliers);
+            saveStoredCustomSuppliers(cfg.customSuppliers);
+            onSuppliersChange?.(cfg.customSuppliers);
+          }
+          if (Array.isArray(cfg.deactivatedSuppliers)) {
+            hasDeact = true;
+            setDeactivatedSuppliers(cfg.deactivatedSuppliers);
+            safeStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(cfg.deactivatedSuppliers));
+            window.dispatchEvent(new CustomEvent('appDeactivatedSuppliersChanged', { detail: cfg.deactivatedSuppliers }));
           }
         }
-      } catch (err) {
-        console.warn('[OutletControl] Notice for strategy_catalog:', err);
-      }
+      } catch {}
 
-      try {
-        // 4. Fetch custom_suppliers
-        const supDocRef = doc(db, 'system_config', 'custom_suppliers');
-        const supSnap = await getDoc(supDocRef);
-        if (supSnap.exists()) {
-          const data = supSnap.data();
-          if (Array.isArray(data.suppliers) && data.suppliers.length > 0) {
-            setCustomSuppliers(data.suppliers);
-            saveStoredCustomSuppliers(data.suppliers);
-            onSuppliersChange?.(data.suppliers);
+      if (isQuotaExceeded()) return;
+      const lastFetch = parseInt(safeStorage.getItem('APP_OUTLET_CONTROL_FETCH_AT') || '0', 10);
+      if (lastFetch && Date.now() - lastFetch < 10 * 60 * 1000 && hasOutlets && hasPromo && hasStrat) {
+        return;
+      }
+      safeStorage.setItem('APP_OUTLET_CONTROL_FETCH_AT', String(Date.now()));
+
+      if (!hasOutlets) {
+        try {
+          const outletDocRef = doc(db, 'system_config', 'outlet_control');
+          const outletSnap = await getDoc(outletDocRef);
+          if (outletSnap.exists()) {
+            const data = outletSnap.data();
+            if (Array.isArray(data.outlets) && data.outlets.length > 0) {
+              setOutletConfigs(data.outlets);
+              saveActiveOutletConfigs(data.outlets);
+              onOutletsChange?.(data.outlets);
+            }
           }
+        } catch (err) {
+          console.warn('[OutletControl] Notice for outlet_control:', err);
         }
-      } catch (err) {
-        console.warn('[OutletControl] Notice for custom_suppliers:', err);
       }
 
-      try {
-        // 5. Fetch deactivated_suppliers
-        const deactDocRef = doc(db, 'system_config', 'deactivated_suppliers');
-        const deactSnap = await getDoc(deactDocRef);
-        if (deactSnap.exists()) {
-          const data = deactSnap.data();
-          if (Array.isArray(data.deactivated)) {
-            setDeactivatedSuppliers(data.deactivated);
-            safeStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(data.deactivated));
-            if (typeof window !== 'undefined') {
+      if (!hasPromo) {
+        try {
+          const promoDocRef = doc(db, 'system_config', 'promo_settings');
+          const promoSnap = await getDoc(promoDocRef);
+          if (promoSnap.exists()) {
+            const data = promoSnap.data();
+            setPromoSettings(data as PromoSettings);
+            if (Array.isArray(data.customBankPromos) && data.customBankPromos.length > 0) {
+              setBankPromosList(data.customBankPromos);
+            }
+            try {
+              safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(data));
+              window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: data }));
+            } catch (e) {}
+          }
+        } catch (err) {
+          console.warn('[OutletControl] Notice for promo_settings:', err);
+        }
+      }
+
+      if (!hasStrat) {
+        try {
+          const stratDocRef = doc(db, 'system_config', 'strategy_catalog');
+          const stratSnap = await getDoc(stratDocRef);
+          if (stratSnap.exists()) {
+            const data = stratSnap.data();
+            if (Array.isArray(data.items) && data.items.length > 0) {
+              setStrategyCatalog(data.items);
+              saveStoredStrategyCatalog(data.items);
+            }
+          }
+        } catch (err) {
+          console.warn('[OutletControl] Notice for strategy_catalog:', err);
+        }
+      }
+
+      if (!hasSup) {
+        try {
+          const supDocRef = doc(db, 'system_config', 'custom_suppliers');
+          const supSnap = await getDoc(supDocRef);
+          if (supSnap.exists()) {
+            const data = supSnap.data();
+            if (Array.isArray(data.suppliers) && data.suppliers.length > 0) {
+              setCustomSuppliers(data.suppliers);
+              saveStoredCustomSuppliers(data.suppliers);
+              onSuppliersChange?.(data.suppliers);
+            }
+          }
+        } catch (err) {
+          console.warn('[OutletControl] Notice for custom_suppliers:', err);
+        }
+      }
+
+      if (!hasDeact) {
+        try {
+          const deactDocRef = doc(db, 'system_config', 'deactivated_suppliers');
+          const deactSnap = await getDoc(deactDocRef);
+          if (deactSnap.exists()) {
+            const data = deactSnap.data();
+            if (Array.isArray(data.deactivated)) {
+              setDeactivatedSuppliers(data.deactivated);
+              safeStorage.setItem('APP_DEACTIVATED_SUPPLIERS', JSON.stringify(data.deactivated));
               window.dispatchEvent(new CustomEvent('appDeactivatedSuppliersChanged', { detail: data.deactivated }));
             }
           }
+        } catch (err) {
+          console.warn('[OutletControl] Notice for deactivated_suppliers:', err);
         }
-      } catch (err) {
-        console.warn('[OutletControl] Notice for deactivated_suppliers:', err);
       }
     };
 
@@ -290,11 +345,14 @@ export const OutletControlModal: React.FC<Props> = ({
     saveActiveOutletConfigs(updated);
     onOutletsChange?.(updated);
 
-    try {
-      const ref = doc(db, 'system_config', 'outlet_control');
-      await setDoc(ref, { outlets: updated, updatedAt: new Date().toISOString() }, { merge: true });
-    } catch (e) {
-      console.warn('[OutletControl] Failed to write outlet to cloud:', e);
+    await updateSystemConfigShared({ outlets: updated });
+    if (!isQuotaExceeded()) {
+      try {
+        const ref = doc(db, 'system_config', 'outlet_control');
+        await setDoc(ref, { outlets: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      } catch (e) {
+        console.warn('[OutletControl] Failed to write outlet to cloud:', e);
+      }
     }
 
     setShowAddModal(false);
@@ -314,23 +372,26 @@ export const OutletControlModal: React.FC<Props> = ({
     saveActiveOutletConfigs(updated);
     onOutletsChange?.(updated);
 
-    try {
-      const ref = doc(db, 'system_config', 'outlet_control');
-      await setDoc(ref, { outlets: updated, updatedAt: new Date().toISOString() }, { merge: true });
-    } catch (e) {
-      console.warn('[OutletControl] Failed to delete outlet on cloud:', e);
-    }
-
-    try {
-      const outletDocRef = doc(db, 'dashboards', outletToDelete.name);
-      await setDoc(outletDocRef, { isDeleted: true, updatedAt: serverTimestamp() }, { merge: true });
+    await updateSystemConfigShared({ outlets: updated });
+    if (!isQuotaExceeded()) {
       try {
-        await deleteDoc(outletDocRef);
-      } catch (delErr) {
-        // Ignored if rules prevent hard delete, isDeleted: true is set
+        const ref = doc(db, 'system_config', 'outlet_control');
+        await setDoc(ref, { outlets: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      } catch (e) {
+        console.warn('[OutletControl] Failed to delete outlet on cloud:', e);
       }
-    } catch (e) {
-      console.warn('[OutletControl] Failed to mark dashboard deleted on cloud:', e);
+
+      try {
+        const outletDocRef = doc(db, 'dashboards', outletToDelete.name);
+        await setDoc(outletDocRef, { isDeleted: true, updatedAt: serverTimestamp() }, { merge: true });
+        try {
+          await deleteDoc(outletDocRef);
+        } catch (delErr) {
+          // Ignored if rules prevent hard delete, isDeleted: true is set
+        }
+      } catch (e) {
+        console.warn('[OutletControl] Failed to mark dashboard deleted on cloud:', e);
+      }
     }
 
     if (typeof window !== 'undefined') {
@@ -390,11 +451,14 @@ export const OutletControlModal: React.FC<Props> = ({
     saveActiveOutletConfigs(updated);
     onOutletsChange?.(updated);
 
-    try {
-      const ref = doc(db, 'system_config', 'outlet_control');
-      await setDoc(ref, { outlets: updated, updatedAt: new Date().toISOString() }, { merge: true });
-    } catch (e) {
-      console.warn('[OutletControl] Failed to update outlet on cloud:', e);
+    await updateSystemConfigShared({ outlets: updated });
+    if (!isQuotaExceeded()) {
+      try {
+        const ref = doc(db, 'system_config', 'outlet_control');
+        await setDoc(ref, { outlets: updated, updatedAt: new Date().toISOString() }, { merge: true });
+      } catch (e) {
+        console.warn('[OutletControl] Failed to update outlet on cloud:', e);
+      }
     }
 
     showToast?.(`Outlet ${finalName} berhasil diperbarui (Area: ${finalArea}, Jenis: ${finalType})`, 'success');
@@ -418,25 +482,15 @@ export const OutletControlModal: React.FC<Props> = ({
 
   const syncPromoSettingsEverywhere = async (newSettings: PromoSettings, targetPromoList: BankingPromoItem[]) => {
     try {
-      safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(newSettings));
+      const mergedPromo = { ...newSettings, customBankPromos: targetPromoList, updatedAt: new Date().toISOString() };
+      safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(mergedPromo));
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: newSettings }));
+        window.dispatchEvent(new CustomEvent('appPromoSettingsChanged', { detail: mergedPromo }));
       }
-      const configRef = doc(db, 'system_config', 'promo_settings');
-      await setDoc(configRef, { ...newSettings, customBankPromos: targetPromoList, updatedAt: new Date().toISOString() }, { merge: true });
-
-      // Realtime push to all outlet documents in dashboards collection
-      for (const out of outletConfigs) {
-        try {
-          const outletDocRef = doc(db, 'dashboards', out.name);
-          await setDoc(outletDocRef, {
-            promoSettings: {
-              ...newSettings,
-              customBankPromos: targetPromoList
-            },
-            bankingPromos: targetPromoList
-          }, { merge: true });
-        } catch (err) {}
+      await updateSystemConfigShared({ promoSettings: mergedPromo });
+      if (!isQuotaExceeded()) {
+        const configRef = doc(db, 'system_config', 'promo_settings');
+        await setDoc(configRef, mergedPromo, { merge: true });
       }
     } catch (err) {
       console.warn('[OutletControl] Sync promo error:', err);
@@ -625,8 +679,11 @@ export const OutletControlModal: React.FC<Props> = ({
   const syncStrategyCatalogEverywhere = async (newList: StrategyMenuItem[]) => {
     try {
       saveStoredStrategyCatalog(newList);
-      const catRef = doc(db, 'system_config', 'strategy_catalog');
-      await setDoc(catRef, { items: newList, updatedAt: new Date().toISOString() }, { merge: true });
+      await updateSystemConfigShared({ strategyCatalog: newList });
+      if (!isQuotaExceeded()) {
+        const catRef = doc(db, 'system_config', 'strategy_catalog');
+        await setDoc(catRef, { items: newList, updatedAt: new Date().toISOString() }, { merge: true });
+      }
     } catch (err) {
       console.warn('[OutletControl] Sync strategy catalog error:', err);
     }
@@ -725,8 +782,11 @@ export const OutletControlModal: React.FC<Props> = ({
     saveStoredCustomSuppliers(newList);
     onSuppliersChange?.(newList);
     try {
-      const supDocRef = doc(db, 'system_config', 'custom_suppliers');
-      await setDoc(supDocRef, { suppliers: newList, updatedAt: new Date().toISOString() }, { merge: true });
+      await updateSystemConfigShared({ customSuppliers: newList });
+      if (!isQuotaExceeded()) {
+        const supDocRef = doc(db, 'system_config', 'custom_suppliers');
+        await setDoc(supDocRef, { suppliers: newList, updatedAt: new Date().toISOString() }, { merge: true });
+      }
     } catch (err) {
       console.warn('[OutletControl] Sync custom suppliers error:', err);
     }
@@ -833,8 +893,11 @@ export const OutletControlModal: React.FC<Props> = ({
       if (typeof window !== 'undefined') {
         window.dispatchEvent(new CustomEvent('appDeactivatedSuppliersChanged', { detail: updatedDeactivated }));
       }
-      const deactDocRef = doc(db, 'system_config', 'deactivated_suppliers');
-      await setDoc(deactDocRef, { deactivated: updatedDeactivated, updatedAt: new Date().toISOString() }, { merge: true });
+      await updateSystemConfigShared({ deactivatedSuppliers: updatedDeactivated });
+      if (!isQuotaExceeded()) {
+        const deactDocRef = doc(db, 'system_config', 'deactivated_suppliers');
+        await setDoc(deactDocRef, { deactivated: updatedDeactivated, updatedAt: new Date().toISOString() }, { merge: true });
+      }
     } catch (err) {
       console.warn('[OutletControl] Sync deactivated suppliers error:', err);
     }

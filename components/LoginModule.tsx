@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { auth, db } from '../firebase';
+import { auth } from '../firebase';
 import { GoogleAuthProvider, signInWithPopup, onAuthStateChanged, User } from 'firebase/auth';
-import { collection, getDocs } from 'firebase/firestore';
 import { Outlet, ModuleType, OutletConfig, Presence } from '../types';
 import { OUTLETS, getActiveOutletConfigs } from '../constants';
 import { safeStorage, safeSessionStorage, safeWindow } from '../lib/safeStorage';
@@ -69,7 +68,7 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
   const manualEmail = safeStorage.getItem('MANUAL_USER_EMAIL') || emailInput || '';
   const activeSessionEmail = (firebaseUser && firebaseUser.email) || manualEmail || '';
 
-  // Poll Online & Offline users opening the same web app (without snapshot)
+  // Poll Online & Offline users via server API (zero Firestore reads, paused when tab hidden)
   useEffect(() => {
     let tabId = safeSessionStorage.getItem('SH_TAB_SESSION_ID');
     if (!tabId) {
@@ -78,6 +77,7 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
     }
 
     const pingLoginPresence = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const emailToPing = (activeSessionEmail || '').toLowerCase().trim();
       if (!emailToPing || !emailToPing.includes('@')) return;
       try {
@@ -96,9 +96,9 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
     };
 
     const loadPresence = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const onlineMap = new Map<string, Presence>();
       const offlineMap = new Map<string, Presence>();
-      const now = Date.now();
 
       try {
         const res = await fetch('/api/presence');
@@ -119,45 +119,25 @@ const LoginModule: React.FC<Props> = ({ onLogin, onPublicView, isFullScreen, onT
         }
       } catch {}
 
-      try {
-        // One-time getDocs poll (NEVER onSnapshot) to include cross-URL sessions
-        const snap = await getDocs(collection(db, 'presence'));
-        snap.forEach((docSnap) => {
-          const d = docSnap.data() as any;
-          const em = (d?.email || '').toLowerCase().trim();
-          if (!em) return;
-          const ts = typeof d?.timestamp?.toMillis === 'function' ? d.timestamp.toMillis() : (Date.parse(d?.lastSeen || '') || 0);
-          const isOnlineCloud = d?.status !== 'OFFLINE' && (now - ts) <= 45 * 1000;
-          const item: Presence = {
-            uid: d.uid || docSnap.id,
-            email: em,
-            displayName: d.displayName || em.split('@')[0],
-            outlet: d.outlet || 'SEMUA OUTLET',
-            photoURL: d.photoURL || '',
-            lastSeen: d.lastSeen || new Date(ts || now).toISOString(),
-            status: isOnlineCloud ? 'ONLINE' : 'OFFLINE',
-            timestamp: ts
-          };
-          if (isOnlineCloud) {
-            offlineMap.delete(em);
-            onlineMap.set(em, item);
-          } else if (!onlineMap.has(em)) {
-            offlineMap.set(em, item);
-          }
-        });
-      } catch {}
-
       setLoginOnlineUsers(Array.from(onlineMap.values()));
       setLoginOfflineUsers(Array.from(offlineMap.values()));
     };
 
     pingLoginPresence();
     loadPresence();
-    const pingTimer = setInterval(pingLoginPresence, 5000);
-    const pollTimer = setInterval(loadPresence, 4000);
+    const pingTimer = setInterval(pingLoginPresence, 8000);
+    const pollTimer = setInterval(loadPresence, 8000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        pingLoginPresence();
+        loadPresence();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       clearInterval(pingTimer);
       clearInterval(pollTimer);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [activeSessionEmail, selectedOutlet, firebaseUser?.photoURL, firebaseUser?.displayName]);
 

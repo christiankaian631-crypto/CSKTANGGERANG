@@ -3,10 +3,7 @@ import {
   getDoc, 
   setDoc, 
   updateDoc,
-  onSnapshot,
-  getDocFromServer,
   getDocs,
-  getDocsFromServer,
   Timestamp,
   collection,
   addDoc,
@@ -17,7 +14,7 @@ import {
   deleteField
 } from "firebase/firestore";
 import { auth, db } from "../firebase";
-import { safeStorage } from "../lib/safeStorage";
+import { safeStorage, safeSessionStorage } from "../lib/safeStorage";
 
 import { Notification, Outlet } from "../types";
 import { OUTLETS, normalizeOutletKey } from "../constants";
@@ -111,17 +108,42 @@ export function mergeDeep(local: any, cloud: any): any {
   return merged;
 }
 
-// Clear any persistent stale quota exceed settings on load to make the app online again
+// Restore persisted quota circuit-breaker state so reloads respect cooldowns instead of hammering an exhausted project
+let quotaExceeded = false;
+let lastQuotaErrorTime = 0;
+const QUOTA_RETRY_INTERVAL = 30 * 60 * 1000; // 30 minutes cooldown when Firestore reports resource-exhausted
+const OUTLET_FIRESTORE_READ_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes per-outlet read cooldown when server sync is available
+const ALL_OUTLETS_FIRESTORE_READ_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes cooldown for full collection reads
+
+const lastOutletFirestoreRead: Record<string, number> = {};
+let lastAllOutletsFirestoreRead = 0;
+
 try {
-  safeStorage.removeItem('FIRESTORE_QUOTA_EXCEEDED');
-  safeStorage.removeItem('FIRESTORE_QUOTA_ERROR_TIME');
+  const savedExceeded = safeStorage.getItem('FIRESTORE_QUOTA_EXCEEDED');
+  const savedTime = parseInt(safeStorage.getItem('FIRESTORE_QUOTA_ERROR_TIME') || '0', 10);
+  if (savedExceeded === 'true' && savedTime > 0) {
+    if (Date.now() - savedTime < QUOTA_RETRY_INTERVAL) {
+      quotaExceeded = true;
+      lastQuotaErrorTime = savedTime;
+    } else {
+      safeStorage.removeItem('FIRESTORE_QUOTA_EXCEEDED');
+      safeStorage.removeItem('FIRESTORE_QUOTA_ERROR_TIME');
+    }
+  }
 } catch (e) {
   // Ignore safeStorage access errors
 }
 
-let quotaExceeded = false;
-let lastQuotaErrorTime = 0;
-const QUOTA_RETRY_INTERVAL = 15 * 1000; // 15 seconds fast retry instead of 1 hour lockout
+function markQuotaExceeded() {
+  quotaExceeded = true;
+  lastQuotaErrorTime = Date.now();
+  try {
+    safeStorage.setItem('FIRESTORE_QUOTA_EXCEEDED', 'true');
+    safeStorage.setItem('FIRESTORE_QUOTA_ERROR_TIME', String(lastQuotaErrorTime));
+  } catch (e) {
+    // Ignore safeStorage access errors
+  }
+}
 
 export function isOfflineError(error: unknown): boolean {
   const errorMessage = error instanceof Error ? error.message : String(error);
@@ -134,11 +156,104 @@ export function isOfflineError(error: unknown): boolean {
 }
 
 function checkQuota(): boolean {
-  return true;
+  if (!quotaExceeded) return true;
+  if (lastQuotaErrorTime > 0 && Date.now() - lastQuotaErrorTime >= QUOTA_RETRY_INTERVAL) {
+    resetQuotaExceeded();
+    return true;
+  }
+  return false;
+}
+
+// Shared ETag + TTL cache for /api/sync/system-config to prevent duplicate reads across modules
+let cachedSystemConfig: any = null;
+let lastSystemConfigFetch = 0;
+let systemConfigETag = '';
+let inFlightSystemConfigPromise: Promise<any> | null = null;
+const SYSTEM_CONFIG_CACHE_TTL_MS = 30 * 1000;
+
+export async function getSystemConfigShared(forceRefresh = false): Promise<any> {
+  const now = Date.now();
+  if (!forceRefresh && cachedSystemConfig && (now - lastSystemConfigFetch) < SYSTEM_CONFIG_CACHE_TTL_MS) {
+    return cachedSystemConfig;
+  }
+  if (inFlightSystemConfigPromise) {
+    return inFlightSystemConfigPromise;
+  }
+  inFlightSystemConfigPromise = (async () => {
+    try {
+      const headers: Record<string, string> = {};
+      if (systemConfigETag && cachedSystemConfig) {
+        headers['If-None-Match'] = systemConfigETag;
+      }
+      const res = await fetch('/api/sync/system-config', { headers });
+      if (res.status === 304 && cachedSystemConfig) {
+        lastSystemConfigFetch = Date.now();
+        return cachedSystemConfig;
+      }
+      if (res.ok) {
+        const etag = res.headers.get('ETag');
+        if (etag) systemConfigETag = etag;
+        const json = await res.json();
+        if (json?.config) {
+          cachedSystemConfig = json.config;
+          lastSystemConfigFetch = Date.now();
+          return cachedSystemConfig;
+        }
+      }
+    } catch {
+      // Ignore network errors
+    } finally {
+      inFlightSystemConfigPromise = null;
+    }
+    return cachedSystemConfig;
+  })();
+  return inFlightSystemConfigPromise;
+}
+
+export async function updateSystemConfigShared(updates: Record<string, any>): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sync/system-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updates)
+    });
+    if (res.ok) {
+      const json = await res.json();
+      if (json?.config) {
+        cachedSystemConfig = json.config;
+        lastSystemConfigFetch = Date.now();
+        systemConfigETag = '';
+      }
+      return true;
+    }
+  } catch {
+    // Ignore network errors
+  }
+  return false;
 }
 
 export async function pushNotification(user: string, outlet: Outlet, message: string): Promise<boolean> {
-  if (!checkQuota() || !auth.currentUser) return false;
+  const entry = {
+    id: `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    user,
+    outlet,
+    message,
+    timestamp: new Date().toISOString()
+  };
+
+  let serverOk = false;
+  try {
+    const res = await fetch('/api/sync/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry)
+    });
+    serverOk = res.ok;
+  } catch {
+    // Ignore server notice
+  }
+
+  if (!checkQuota() || !auth.currentUser) return serverOk;
   try {
     const notifRef = collection(db, NOTIFICATIONS_COLLECTION);
     await addDoc(notifRef, {
@@ -150,7 +265,7 @@ export async function pushNotification(user: string, outlet: Outlet, message: st
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, NOTIFICATIONS_COLLECTION);
-    return false;
+    return serverOk;
   }
 }
 
@@ -161,15 +276,13 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   const isQuotaError = errorMessage.includes('resource-exhausted') || errorMessage.includes('Quota exceeded');
   
   if (isQuotaError) {
-    quotaExceeded = true;
-    lastQuotaErrorTime = Date.now();
-    console.warn('[CloudSync] Firestore rate limit or quota exceeded. Writes will retry in 15 seconds. Active listeners kept alive.');
+    markQuotaExceeded();
+    console.warn('[CloudSync] Firestore quota exceeded. Pausing Firestore reads/writes for 30 minutes and relying on server sync.');
     return;
   }
 
   if (isOfflineError(error) || errorMessage.includes('INTERNAL ASSERTION FAILED') || errorMessage.includes('Unexpected state')) {
     console.warn(`[CloudSync] Firestore operation (${operationType}) noted offline or internal assertion at path (${path}):`, errorMessage);
-    // Return gracefully for ALL operations during offline state or internal assertion instead of throwing fatal crashes
     return;
   }
 
@@ -192,31 +305,31 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
   
   const jsonError = JSON.stringify(errInfo);
   console.error('Firestore Error: ', jsonError);
-  if (operationType === 'listen' || operationType === 'get' || operationType === 'list') {
+  if (operationType === 'listen' || operationType === 'get' || operationType === 'list' || operationType === 'write') {
     console.warn(`[CloudSync] Non-fatal ${operationType} failure at path: ${path}`);
     return;
   }
   throw new Error(jsonError);
 }
 
-// CRITICAL: Call getDocFromServer to test connection on boot
+// Lightweight connection check: runs at most once per browser session via cache-aware getDoc (zero getDocFromServer waste)
 export async function testConnection() {
+  if (!checkQuota()) return;
   try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-    console.info('[CloudSync] Firebase connection test succeeded. Clearing quota exceeded state if any.');
-    resetQuotaExceeded();
+    if (safeSessionStorage.getItem('FIRESTORE_CONN_TESTED') === 'true') {
+      return;
+    }
+    safeSessionStorage.setItem('FIRESTORE_CONN_TESTED', 'true');
+  } catch {}
+
+  try {
+    await getDoc(doc(db, 'test', 'connection'));
+    console.info('[CloudSync] Firebase connection check completed.');
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const isQuotaError = errorMessage.includes('resource-exhausted') || errorMessage.includes('Quota exceeded');
     if (isQuotaError) {
-      quotaExceeded = true;
-      lastQuotaErrorTime = Date.now();
-      try {
-        safeStorage.setItem('FIRESTORE_QUOTA_EXCEEDED', 'true');
-        safeStorage.setItem('FIRESTORE_QUOTA_ERROR_TIME', String(lastQuotaErrorTime));
-      } catch (e) {
-        // Ignore safeStorage access errors
-      }
+      markQuotaExceeded();
     } else if (isOfflineError(error) || errorMessage.includes('INTERNAL ASSERTION FAILED') || errorMessage.includes('Unexpected state')) {
       console.warn("[CloudSync] Client is offline or assertion:", errorMessage);
     } else {
@@ -224,7 +337,6 @@ export async function testConnection() {
     }
   }
 }
-// Removed top-level testConnection() to avoid race conditions
 
 // Global console filter to suppress persistent Firestore quota messages
 const originalError = console.error;
@@ -253,27 +365,92 @@ console.warn = (...args) => {
 };
 
 export function startNotificationListener(onUpdate: (notifications: Notification[]) => void) {
-  if (!checkQuota() || !auth.currentUser) return () => {};
-  
-  const notifRef = collection(db, NOTIFICATIONS_COLLECTION);
-  const q = query(notifRef, orderBy("timestamp", "desc"), limit(10));
-  
-  const unsub = onSnapshot(q, (snap) => {
-    const notifs: Notification[] = [];
-    snap.forEach((doc) => {
-      const data = doc.data();
-      notifs.push({
-        id: doc.id,
-        user: data.user,
-        outlet: data.outlet,
-        message: data.message,
-        timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : (typeof data.timestamp === 'string' ? data.timestamp : new Date().toISOString())
-      });
-    });
-    onUpdate(notifs);
-  }, (error) => {
-    handleFirestoreError(error, OperationType.LISTEN, NOTIFICATIONS_COLLECTION);
-  });
+  let isSubscribed = true;
+  let lastKnownEtag = '';
+  let lastKnownHash = '';
+  let lastFetchTime = 0;
+
+  const pollNotifications = async () => {
+    if (!isSubscribed) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    lastFetchTime = Date.now();
+
+    let serverList: Notification[] = [];
+    try {
+      const headers: Record<string, string> = {};
+      if (lastKnownEtag) headers['If-None-Match'] = lastKnownEtag;
+      const res = await fetch('/api/sync/notifications', { headers });
+      if (res.status === 304) return;
+      if (res.ok) {
+        const etag = res.headers.get('ETag');
+        if (etag) lastKnownEtag = etag;
+        const json = await res.json();
+        if (Array.isArray(json?.notifications)) {
+          serverList = json.notifications;
+        }
+      }
+    } catch {
+      // Ignore transient network errors
+    }
+
+    // One-time per session Firestore seed ONLY if server has no notifications yet and quota allows
+    if (serverList.length === 0 && checkQuota() && auth.currentUser) {
+      let alreadySeeded = false;
+      try {
+        alreadySeeded = safeSessionStorage.getItem('FIRESTORE_NOTIF_SEEDED') === 'true';
+      } catch {}
+      if (!alreadySeeded) {
+        try {
+          safeSessionStorage.setItem('FIRESTORE_NOTIF_SEEDED', 'true');
+          const notifRef = collection(db, NOTIFICATIONS_COLLECTION);
+          const q = query(notifRef, orderBy("timestamp", "desc"), limit(10));
+          const snap = await getDocs(q);
+          const cloudNotifs: Notification[] = [];
+          snap.forEach((docSnap) => {
+            const data = docSnap.data();
+            cloudNotifs.push({
+              id: docSnap.id,
+              user: data.user,
+              outlet: data.outlet,
+              message: data.message,
+              timestamp: data.timestamp?.toDate ? data.timestamp.toDate().toISOString() : (typeof data.timestamp === 'string' ? data.timestamp : new Date().toISOString())
+            });
+          });
+          if (cloudNotifs.length > 0) {
+            serverList = cloudNotifs;
+          }
+        } catch (error) {
+          handleFirestoreError(error, OperationType.LIST, NOTIFICATIONS_COLLECTION);
+        }
+      }
+    }
+
+    const nextHash = JSON.stringify(serverList);
+    if (nextHash !== lastKnownHash && isSubscribed) {
+      lastKnownHash = nextHash;
+      onUpdate(serverList);
+    }
+  };
+
+  pollNotifications();
+  const interval = setInterval(pollNotifications, 30000);
+
+  const handleVisibility = () => {
+    if (document.visibilityState === 'visible' && isSubscribed && (Date.now() - lastFetchTime >= 15000)) {
+      pollNotifications();
+    }
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibility);
+  }
+
+  const unsub = () => {
+    isSubscribed = false;
+    clearInterval(interval);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    }
+  };
 
   activeListeners.push(unsub);
   return () => {
@@ -283,7 +460,27 @@ export function startNotificationListener(onUpdate: (notifications: Notification
 }
 
 export async function saveNotification(notification: any): Promise<boolean> {
-  if (!checkQuota() || !auth.currentUser) return false;
+  const entry = {
+    id: notification?.id || `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    user: notification?.user || 'System',
+    outlet: notification?.outlet || 'SEMUA OUTLET',
+    message: notification?.message || '',
+    timestamp: typeof notification?.timestamp === 'string' && notification.timestamp ? notification.timestamp : new Date().toISOString()
+  };
+
+  let serverOk = false;
+  try {
+    const res = await fetch('/api/sync/notifications', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry)
+    });
+    serverOk = res.ok;
+  } catch {
+    // Ignore server notice
+  }
+
+  if (!checkQuota() || !auth.currentUser) return serverOk;
   try {
     const notifRef = collection(db, NOTIFICATIONS_COLLECTION);
     const payload = {
@@ -293,8 +490,8 @@ export async function saveNotification(notification: any): Promise<boolean> {
     await addDoc(notifRef, payload);
     return true;
   } catch (error) {
-    console.error('Error saving notification:', error);
-    return false;
+    handleFirestoreError(error, OperationType.WRITE, NOTIFICATIONS_COLLECTION);
+    return serverOk;
   }
 }
 
@@ -581,7 +778,7 @@ let lastBackupTimeByOutlet: Record<string, number> = {};
 const lastFirestoreWriteByOutlet: Record<string, number> = {};
 const pendingFirestoreTimerByOutlet: Record<string, any> = {};
 const pendingFirestorePayloadByOutlet: Record<string, { email: string; data: Record<string, any>; extraGlobal?: Record<string, any> }> = {};
-const FIRESTORE_MIN_WRITE_INTERVAL_MS = 5000; // at most 1 write every 5 seconds per outlet to protect daily write quota
+const FIRESTORE_MIN_WRITE_INTERVAL_MS = 60000; // at most 1 write per minute per outlet for autosaves to preserve daily Firestore quota
 
 async function executeFirestoreWrite(
   email: string,
@@ -772,7 +969,11 @@ export async function saveUserData(email: string, data: any, outletId?: string):
   }
 }
 
-export async function fetchUserData(email: string, outletId?: string): Promise<any | null> {
+export async function fetchUserData(
+  email: string,
+  outletId?: string,
+  options?: { forceCloud?: boolean; skipFirestore?: boolean }
+): Promise<any | null> {
   const canonicalOutletId = normalizeOutletKey(outletId);
   if (!canonicalOutletId || canonicalOutletId === 'ALL' || canonicalOutletId === 'SEMUA OUTLET') {
     return {};
@@ -781,7 +982,7 @@ export async function fetchUserData(email: string, outletId?: string): Promise<a
   const cacheKey = `BARN_OFFLINE_CACHE_${email.toLowerCase()}_${canonicalOutletId}`;
   let combinedData: any = {};
 
-  // 1. Fetch from high-speed Server Sync API (instant across devices)
+  // 1. Fetch from high-speed Server Sync API (instant across devices, 0 Firestore quota)
   try {
     const sRes = await fetch(`/api/sync/outlet/${encodeURIComponent(canonicalOutletId)}`);
     if (sRes.ok) {
@@ -794,16 +995,20 @@ export async function fetchUserData(email: string, outletId?: string): Promise<a
     console.warn('[ServerSync] Server fetchUserData notice:', e);
   }
 
-  // 2. Fetch from Firestore if quota allows and authenticated, then merge
-  if (checkQuota() && auth.currentUser) {
+  // 2. Fetch from Firestore ONLY if server returned empty, forceCloud requested, or read cooldown elapsed
+  const now = Date.now();
+  const lastRead = lastOutletFirestoreRead[canonicalOutletId] || 0;
+  const shouldHitFirestore =
+    !options?.skipFirestore &&
+    checkQuota() &&
+    Boolean(auth.currentUser) &&
+    (options?.forceCloud || Object.keys(combinedData).length === 0 || (now - lastRead) >= OUTLET_FIRESTORE_READ_COOLDOWN_MS);
+
+  if (shouldHitFirestore) {
+    lastOutletFirestoreRead[canonicalOutletId] = now;
     try {
       const outletRef = doc(db, COLLECTION_NAME, canonicalOutletId);
-      let outletSnap;
-      try {
-        outletSnap = await getDocFromServer(outletRef);
-      } catch {
-        outletSnap = await getDoc(outletRef);
-      }
+      const outletSnap = await getDoc(outletRef);
       if (outletSnap && outletSnap.exists()) {
         const rawDoc = outletSnap.data();
         if (!rawDoc?.isDeleted) {
@@ -836,7 +1041,9 @@ export async function fetchUserData(email: string, outletId?: string): Promise<a
   return combinedData;
 }
 
-export async function fetchAllOutletsData(): Promise<Record<string, any> | null> {
+export async function fetchAllOutletsData(
+  options?: { forceCloud?: boolean; skipFirestore?: boolean }
+): Promise<Record<string, any> | null> {
   const cacheKey = "BARN_OFFLINE_CACHE_ALL_OUTLETS";
   const results: Record<string, any> = {};
 
@@ -857,7 +1064,7 @@ export async function fetchAllOutletsData(): Promise<Record<string, any> | null>
     }
   };
 
-  // 1. Fetch from server-side sync API
+  // 1. Fetch from server-side sync API (primary, 0 Firestore quota)
   try {
     const sRes = await fetch('/api/sync/all-outlets');
     if (sRes.ok) {
@@ -872,16 +1079,21 @@ export async function fetchAllOutletsData(): Promise<Record<string, any> | null>
     console.warn('[ServerSync] Fetch all outlets notice:', err);
   }
 
-  // 2. Fetch from Firestore if quota allows, user is authenticated, and merge with latest
-  if (checkQuota() && auth.currentUser) {
+  // 2. Fallback to Firestore ONLY if server had no outlets or forceCloud is explicitly requested (with cooldown)
+  const now = Date.now();
+  const serverHasOutlets = Object.keys(results).length > 0;
+  const shouldHitFirestore =
+    !options?.skipFirestore &&
+    checkQuota() &&
+    Boolean(auth.currentUser) &&
+    (options?.forceCloud || !serverHasOutlets) &&
+    (options?.forceCloud || (now - lastAllOutletsFirestoreRead) >= ALL_OUTLETS_FIRESTORE_READ_COOLDOWN_MS);
+
+  if (shouldHitFirestore) {
+    lastAllOutletsFirestoreRead = now;
     try {
       const colRef = collection(db, COLLECTION_NAME);
-      let snap;
-      try {
-        snap = await getDocsFromServer(colRef);
-      } catch {
-        snap = await getDocs(colRef);
-      }
+      const snap = await getDocs(colRef);
       snap.forEach(docSnap => {
         const data = docSnap.data();
         const cloudUpdated = data?.updatedAt?.toDate?.()?.toISOString() || null;
@@ -910,6 +1122,7 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
   let isSubscribed = true;
   let lastKnownHash = '';
   let lastKnownEtag = '';
+  let lastPollTime = 0;
 
   const upsertIntoMap = (target: Record<string, any>, rawId: string, rawData: any, lastUpdatedVal: string | null) => {
     if (!rawData || rawData.isDeleted) return;
@@ -928,13 +1141,13 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
     }
   };
 
-  // Function to poll and sync from server API with ETag & CDN efficiency
+  // Zero-snapshot ETag polling from Server API (paused when tab hidden)
   const pollServerSync = async () => {
     if (!isSubscribed) return;
-    // Don't waste CDN requests if the tab is in the background
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
       return;
     }
+    lastPollTime = Date.now();
     try {
       const headers: Record<string, string> = {};
       if (lastKnownEtag) {
@@ -942,7 +1155,6 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
       }
       const res = await fetch('/api/sync/all-outlets', { headers });
       
-      // If 304 Not Modified, data is unchanged - 0 bytes downloaded, save bandwidth & compute
       if (res.status === 304) {
         return;
       }
@@ -964,44 +1176,21 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
           }
         }
       }
-    } catch (e) {
+    } catch {
       // Ignore background poll errors
     }
   };
 
   pollServerSync();
-  // Poll every 10 seconds (down from 3.5s) to save Vercel CDN request limits
-  const pollInterval = setInterval(pollServerSync, 10000);
+  const pollInterval = setInterval(pollServerSync, 20000);
 
   const handleVisibilityChange = () => {
-    if (document.visibilityState === 'visible' && isSubscribed) {
+    if (document.visibilityState === 'visible' && isSubscribed && (Date.now() - lastPollTime >= 5000)) {
       pollServerSync();
     }
   };
   if (typeof document !== 'undefined') {
     document.addEventListener('visibilitychange', handleVisibilityChange);
-  }
-
-  let unsubFirestore: (() => void) | null = null;
-  if (checkQuota() && auth.currentUser) {
-    try {
-      const colRef = collection(db, COLLECTION_NAME);
-      unsubFirestore = onSnapshot(colRef, (snap) => {
-        const results: Record<string, any> = {};
-        snap.forEach((docSnap) => {
-          const data = docSnap.data();
-          const updatedAtIso = data?.updatedAt?.toDate?.()?.toISOString() || null;
-          upsertIntoMap(results, docSnap.id, data, updatedAtIso);
-        });
-        const newHash = JSON.stringify(results);
-        if (newHash !== lastKnownHash) {
-          lastKnownHash = newHash;
-          onUpdate(results);
-        }
-      }, (error) => {
-        handleFirestoreError(error, OperationType.LISTEN, COLLECTION_NAME);
-      });
-    } catch {}
   }
 
   const cleanup = () => {
@@ -1010,7 +1199,6 @@ export function startAllOutletsListener(onUpdate: (data: Record<string, any>) =>
     if (typeof document !== 'undefined') {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     }
-    if (unsubFirestore) unsubFirestore();
   };
 
   activeListeners.push(cleanup);
@@ -1045,8 +1233,11 @@ export function startRealtimeListener(
       }
     } catch (e) {}
 
-    // Fallback: ambil 1 kali dari Firestore via getDoc
-    if (checkQuota() && auth.currentUser) {
+    // Fallback: ambil 1 kali dari Firestore via getDoc hanya jika cooldown terpenuhi dan server kosong
+    const now = Date.now();
+    const lastRead = lastOutletFirestoreRead[canonicalOutletId] || 0;
+    if (checkQuota() && auth.currentUser && (now - lastRead) >= OUTLET_FIRESTORE_READ_COOLDOWN_MS) {
+      lastOutletFirestoreRead[canonicalOutletId] = now;
       try {
         const outletRef = doc(db, COLLECTION_NAME, canonicalOutletId);
         const snap = await getDoc(outletRef);

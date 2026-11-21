@@ -5,7 +5,7 @@ import { sortStaff, calculateLeaveEntitlement } from '../lib/staffUtils';
 import { getMergedLeaveRecords } from '../lib/scheduleUtils';
 import { toLocalDateStr } from '../lib/dateUtils';
 import { INITIAL_GSI_STRUCTURE, DIVISIONS, OUTLETS, ROLES_BY_DIVISION, MONTH_NAMES, QA_PASSING_TIERS, getQaScoreTier, QA_SERVICE_SUBJECTS, QA_KITCHEN_SUBJECTS, QA_BAR_SUBJECTS, calcQAScore } from '../constants';
-import { pushNotification } from '../services/cloudService';
+import { pushNotification, isQuotaExceeded } from '../services/cloudService';
 import { safeWindow } from '../lib/safeStorage';
 import { doc, getDoc, updateDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
@@ -3284,6 +3284,10 @@ _Dibuat otomatis dari Sistem Admin Panel QA Audit_`;
         setIsClearingOtherLogistics(true);
         setShowConfirm(null);
         try {
+          if (isQuotaExceeded()) {
+            showToast?.("Kuota Firebase sedang dalam jeda. Pembersihan cloud dilewati.", "info");
+            return;
+          }
           const outletsToClear = ['SH BINTARO', 'SH ALSUT'];
           for (const outletId of outletsToClear) {
             const docRef = doc(db, 'dashboards', outletId);

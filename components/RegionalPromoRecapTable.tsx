@@ -6,6 +6,7 @@ import ExcelJS from 'exceljs';
 import { saveAs } from 'file-saver';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { getSystemConfigShared, isQuotaExceeded } from '../services/cloudService';
 
 interface Props {
   allOutletsData: Record<string, any>;
@@ -50,6 +51,21 @@ export const RegionalPromoRecapTable: React.FC<Props> = ({
 
     const fetchPromo = async () => {
       try {
+        const cfg = await getSystemConfigShared();
+        if (cfg?.promoSettings) {
+          try {
+            safeStorage.setItem('APP_PROMO_SETTINGS', JSON.stringify(cfg.promoSettings));
+          } catch {}
+          setPromoConfigVersion(v => v + 1);
+          return;
+        }
+      } catch {}
+
+      if (isQuotaExceeded()) return;
+      try {
+        const lastFetch = parseInt(safeStorage.getItem('APP_PROMO_SETTINGS_FETCH_AT') || '0', 10);
+        if (lastFetch && Date.now() - lastFetch < 10 * 60 * 1000) return;
+        safeStorage.setItem('APP_PROMO_SETTINGS_FETCH_AT', String(Date.now()));
         const promoDocRef = doc(db, 'system_config', 'promo_settings');
         const snap = await getDoc(promoDocRef);
         if (snap.exists()) {

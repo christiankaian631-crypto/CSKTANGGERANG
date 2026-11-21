@@ -11,6 +11,8 @@ const DATA_DIR = path.join(rootDir, "data_store");
 const OUTLETS_FILE = path.join(DATA_DIR, "outlets.json");
 const SYSTEM_CONFIG_FILE = path.join(DATA_DIR, "system_config.json");
 const PRESENCE_FILE = path.join(DATA_DIR, "presence_users.json");
+const NOTIFICATIONS_FILE = path.join(DATA_DIR, "notifications.json");
+const CHAT_FILE = path.join(DATA_DIR, "chat_messages.json");
 
 // Ensure directories exist
 try {
@@ -164,30 +166,108 @@ function mergeOutletMonth(existingMonth: any, incomingMonth: any): any {
   return result;
 }
 
+let systemConfigCache: any = null;
+let systemConfigVersion = Date.now();
+let systemConfigETag = `"sc_${systemConfigVersion.toString(36)}"`;
+
 function readSystemConfig(): any {
+  if (systemConfigCache) return systemConfigCache;
   try {
     if (fs.existsSync(SYSTEM_CONFIG_FILE)) {
-      return JSON.parse(fs.readFileSync(SYSTEM_CONFIG_FILE, "utf-8"));
+      systemConfigCache = JSON.parse(fs.readFileSync(SYSTEM_CONFIG_FILE, "utf-8"));
+      return systemConfigCache;
     }
   } catch (err) {
     console.warn("Failed reading system_config.json:", err);
   }
-  return {
+  systemConfigCache = {
     outlets: DEFAULT_SYNC_OUTLETS,
     maxDailyInputs: 2500,
     onlineTimeLimit: 1440,
     maxOnlineUsers: 10,
     updatedAt: new Date().toISOString()
   };
+  return systemConfigCache;
 }
 
 function writeSystemConfig(data: any) {
+  systemConfigCache = data;
+  systemConfigVersion = Date.now();
+  systemConfigETag = `"sc_${systemConfigVersion.toString(36)}"`;
   try {
     const tempFile = `${SYSTEM_CONFIG_FILE}.tmp`;
     fs.writeFileSync(tempFile, JSON.stringify(data, null, 2), "utf-8");
     fs.renameSync(tempFile, SYSTEM_CONFIG_FILE);
   } catch (err) {
     console.error("Failed writing system_config.json:", err);
+  }
+}
+
+let notificationsCache: any[] | null = null;
+let notificationsVersion = Date.now();
+let notificationsETag = `"nt_${notificationsVersion.toString(36)}"`;
+
+function readNotifications(): any[] {
+  if (notificationsCache) return notificationsCache;
+  try {
+    if (fs.existsSync(NOTIFICATIONS_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(NOTIFICATIONS_FILE, "utf-8"));
+      if (Array.isArray(parsed)) {
+        notificationsCache = parsed;
+        return notificationsCache;
+      }
+    }
+  } catch (err) {
+    console.warn("Failed reading notifications.json:", err);
+  }
+  notificationsCache = [];
+  return notificationsCache;
+}
+
+function writeNotifications(list: any[]) {
+  notificationsCache = list;
+  notificationsVersion = Date.now();
+  notificationsETag = `"nt_${notificationsVersion.toString(36)}"`;
+  try {
+    const tempFile = `${NOTIFICATIONS_FILE}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(list, null, 2), "utf-8");
+    fs.renameSync(tempFile, NOTIFICATIONS_FILE);
+  } catch (err) {
+    console.error("Failed writing notifications.json:", err);
+  }
+}
+
+let chatMessagesCache: any[] | null = null;
+let chatMessagesVersion = Date.now();
+let chatMessagesETag = `"ch_${chatMessagesVersion.toString(36)}"`;
+
+function readChatMessages(): any[] {
+  if (chatMessagesCache) return chatMessagesCache;
+  try {
+    if (fs.existsSync(CHAT_FILE)) {
+      const parsed = JSON.parse(fs.readFileSync(CHAT_FILE, "utf-8"));
+      if (Array.isArray(parsed)) {
+        chatMessagesCache = parsed;
+        return chatMessagesCache;
+      }
+    }
+  } catch (err) {
+    console.warn("Failed reading chat_messages.json:", err);
+  }
+  chatMessagesCache = [];
+  return chatMessagesCache;
+}
+
+function writeChatMessages(list: any[]) {
+  chatMessagesCache = list;
+  chatMessagesVersion = Date.now();
+  chatMessagesETag = `"ch_${chatMessagesVersion.toString(36)}"`;
+  try {
+    const tempFile = `${CHAT_FILE}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(list, null, 2), "utf-8");
+    fs.renameSync(tempFile, CHAT_FILE);
+  } catch (err) {
+    console.error("Failed writing chat_messages.json:", err);
   }
 }
 
@@ -669,9 +749,15 @@ async function startServer() {
     }
   });
 
-  app.get("/api/sync/system-config", (_req, res) => {
+  app.get("/api/sync/system-config", (req, res) => {
     try {
       const config = readSystemConfig();
+      const clientETag = req.headers['if-none-match'];
+      if (clientETag && clientETag === systemConfigETag) {
+        return res.status(304).end();
+      }
+      res.setHeader('ETag', systemConfigETag);
+      res.setHeader('Cache-Control', 'public, max-age=10, stale-while-revalidate=30');
       res.json({ success: true, config });
     } catch (error) {
       res.status(500).json({ error: "Failed to read system config" });
@@ -680,13 +766,90 @@ async function startServer() {
 
   app.post("/api/sync/system-config", (req, res) => {
     try {
-      const updates = req.body;
+      const updates = req.body && typeof req.body === 'object' ? req.body : {};
       const current = readSystemConfig();
       const next = { ...current, ...updates, updatedAt: new Date().toISOString() };
       writeSystemConfig(next);
       res.json({ success: true, config: next });
     } catch (error) {
       res.status(500).json({ error: "Failed to update system config" });
+    }
+  });
+
+  app.get("/api/sync/notifications", (req, res) => {
+    try {
+      const list = readNotifications();
+      const clientETag = req.headers['if-none-match'];
+      if (clientETag && clientETag === notificationsETag) {
+        return res.status(304).end();
+      }
+      res.setHeader('ETag', notificationsETag);
+      res.setHeader('Cache-Control', 'public, max-age=5, stale-while-revalidate=15');
+      res.json({ success: true, notifications: list.slice(0, 20) });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to read notifications" });
+    }
+  });
+
+  app.post("/api/sync/notifications", (req, res) => {
+    try {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const list = readNotifications();
+      const entry = {
+        id: body.id || `notif_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        user: body.user || 'System',
+        outlet: body.outlet || 'SEMUA OUTLET',
+        message: body.message || '',
+        timestamp: typeof body.timestamp === 'string' && body.timestamp ? body.timestamp : new Date().toISOString()
+      };
+      if (!entry.message) {
+        return res.status(400).json({ error: "Missing notification message" });
+      }
+      const next = [entry, ...list.filter((n: any) => n.id !== entry.id)].slice(0, 30);
+      writeNotifications(next);
+      res.json({ success: true, notification: entry });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save notification" });
+    }
+  });
+
+  app.get("/api/sync/chat", (req, res) => {
+    try {
+      const list = readChatMessages();
+      const clientETag = req.headers['if-none-match'];
+      if (clientETag && clientETag === chatMessagesETag) {
+        return res.status(304).end();
+      }
+      res.setHeader('ETag', chatMessagesETag);
+      res.setHeader('Cache-Control', 'public, max-age=3, stale-while-revalidate=10');
+      res.json({ success: true, messages: list.slice(-50) });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to read chat messages" });
+    }
+  });
+
+  app.post("/api/sync/chat", (req, res) => {
+    try {
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const text = typeof body.text === 'string' ? body.text.trim() : '';
+      if (!text) {
+        return res.status(400).json({ error: "Message text is required" });
+      }
+      const list = readChatMessages();
+      const entry = {
+        id: body.id || `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        text,
+        senderEmail: body.senderEmail || '',
+        senderName: body.senderName || 'User',
+        photoURL: body.photoURL || '',
+        timestamp: typeof body.timestamp === 'string' && body.timestamp ? body.timestamp : new Date().toISOString(),
+        outlet: body.outlet || 'UNKNOWN'
+      };
+      const next = [...list.filter((m: any) => m.id !== entry.id), entry].slice(-100);
+      writeChatMessages(next);
+      res.json({ success: true, message: entry });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to save chat message" });
     }
   });
 

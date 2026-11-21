@@ -2,20 +2,16 @@ import React, { useState, useEffect, useRef } from 'react';
 import { db, auth } from '../firebase';
 import { 
   collection, 
-  query, 
-  orderBy, 
-  limit, 
-  onSnapshot, 
   addDoc, 
   setDoc, 
+  getDoc,
   doc, 
-  serverTimestamp, 
-  Timestamp
+  serverTimestamp
 } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { motion, AnimatePresence } from 'motion/react';
 import { ChatMessage, Presence, Outlet } from '../types';
-import { isQuotaExceeded } from '../services/cloudService';
+import { isQuotaExceeded, getSystemConfigShared, updateSystemConfigShared } from '../services/cloudService';
 import { safeStorage } from '../lib/safeStorage';
 
 interface Props {
@@ -236,17 +232,9 @@ const RealtimeFeatures: React.FC<Props> = ({
     };
   }, [globalData, outletMonthlyData, filters?.month]);
 
-  // Synchronize dynamic settings with global server config & Firestore so that they are shared across users in real-time.
+  // Synchronize dynamic settings with global server config & best-effort Firestore backup
   const updateSystemConfig = async (updates: { maxDailyInputs?: number; onlineTimeLimit?: number; maxOnlineUsers?: number }) => {
-    try {
-      await fetch('/api/sync/system-config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates)
-      });
-    } catch (e) {
-      // Fallback
-    }
+    await updateSystemConfigShared(updates);
 
     if (!auth.currentUser || isQuotaExceeded()) return;
     try {
@@ -262,64 +250,51 @@ const RealtimeFeatures: React.FC<Props> = ({
   };
 
   useEffect(() => {
-    // 1. Fetch from high-speed Server API first
-    const fetchServerConfig = async () => {
-      try {
-        const res = await fetch('/api/sync/system-config');
-        if (res.ok) {
-          const json = await res.json();
-          if (json.config) {
-            if (json.config.maxDailyInputs !== undefined) {
-              setMaxDailyInputs(json.config.maxDailyInputs);
-              safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', json.config.maxDailyInputs.toString());
-            }
-            if (json.config.onlineTimeLimit !== undefined) {
-              setOnlineTimeLimit(json.config.onlineTimeLimit);
-              safeStorage.setItem('ONLINE_TIME_LIMIT', json.config.onlineTimeLimit.toString());
-            }
-            if (json.config.maxOnlineUsers !== undefined) {
-              setMaxOnlineUsers(json.config.maxOnlineUsers);
-              safeStorage.setItem('MAX_ONLINE_USERS', json.config.maxOnlineUsers.toString());
-            }
-          }
-        }
-      } catch (e) {}
+    let isMounted = true;
+    const applyConfig = (cfg: any) => {
+      if (!cfg || !isMounted) return;
+      if (cfg.maxDailyInputs !== undefined) {
+        setMaxDailyInputs(cfg.maxDailyInputs);
+        safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', cfg.maxDailyInputs.toString());
+      }
+      if (cfg.onlineTimeLimit !== undefined) {
+        setOnlineTimeLimit(cfg.onlineTimeLimit);
+        safeStorage.setItem('ONLINE_TIME_LIMIT', cfg.onlineTimeLimit.toString());
+      }
+      if (cfg.maxOnlineUsers !== undefined) {
+        setMaxOnlineUsers(cfg.maxOnlineUsers);
+        safeStorage.setItem('MAX_ONLINE_USERS', cfg.maxOnlineUsers.toString());
+      }
     };
-    fetchServerConfig();
 
-    if (!authUid || isQuotaExceeded()) return;
+    getSystemConfigShared().then(async (cfg) => {
+      if (!isMounted) return;
+      if (cfg && (cfg.maxDailyInputs !== undefined || cfg.onlineTimeLimit !== undefined || cfg.maxOnlineUsers !== undefined)) {
+        applyConfig(cfg);
+        return;
+      }
+      if (authUid && !isQuotaExceeded()) {
+        try {
+          const snap = await getDoc(doc(db, 'system_data', 'system_config'));
+          if (snap.exists() && isMounted) {
+            applyConfig(snap.data());
+          }
+        } catch {}
+      }
+    }).catch(() => {});
 
-    try {
-      const configRef = doc(db, 'system_data', 'system_config');
-      const unsubscribe = onSnapshot(configRef, (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          if (data.maxDailyInputs !== undefined) {
-            setMaxDailyInputs(data.maxDailyInputs);
-            safeStorage.setItem('MAX_DAILY_INPUT_LIMIT', data.maxDailyInputs.toString());
-          }
-          if (data.onlineTimeLimit !== undefined) {
-            setOnlineTimeLimit(data.onlineTimeLimit);
-            safeStorage.setItem('ONLINE_TIME_LIMIT', data.onlineTimeLimit.toString());
-          }
-          if (data.maxOnlineUsers !== undefined) {
-            setMaxOnlineUsers(data.maxOnlineUsers);
-            safeStorage.setItem('MAX_ONLINE_USERS', data.maxOnlineUsers.toString());
-          }
-        }
-      }, () => {});
-
-      return unsubscribe;
-    } catch (e) {}
+    return () => {
+      isMounted = false;
+    };
   }, [authUid]);
 
-  // Synchronize presence only via fast server API (zero Firestore snapshot)
+  // Synchronize presence only via fast server API (zero Firestore snapshot, paused when hidden)
   useEffect(() => {
-    // If parent App.tsx already provides live onlineUsers, no redundant polling needed
     if (propOnlineUsers) return;
     if (!user.email) return;
 
     const fetchOnlineUsers = async () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       try {
         const res = await fetch('/api/presence');
         if (res.ok) {
@@ -335,55 +310,71 @@ const RealtimeFeatures: React.FC<Props> = ({
     };
 
     fetchOnlineUsers();
-    const interval = setInterval(fetchOnlineUsers, 2500);
+    const interval = setInterval(fetchOnlineUsers, 5000);
     return () => clearInterval(interval);
   }, [user.email, propOnlineUsers]);
 
-  // Listen to Chat Messages
+  // Poll Chat Messages via Server ETag API (ZERO onSnapshot / zero Firestore read quota)
+  const chatETagRef = useRef<string>('');
+  const knownChatIdsRef = useRef<Set<string>>(new Set());
+  const chatInitializedRef = useRef<boolean>(false);
+
   useEffect(() => {
-    if (!user.email || !authUid) return;
+    if (!user.email) return;
+    let isMounted = true;
 
-    // Use serverTime for more reliable multi-user sync across different timezones
-    const q = query(
-      collection(db, 'chat_messages'),
-      orderBy('serverTime', 'desc'),
-      limit(50)
-    );
+    const fetchChatMessages = async () => {
+      if (!isMounted) return;
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      try {
+        const headers: Record<string, string> = {};
+        if (chatETagRef.current) headers['If-None-Match'] = chatETagRef.current;
+        const res = await fetch('/api/sync/chat', { headers });
+        if (res.status === 304) return;
+        if (!res.ok) return;
+        const etag = res.headers.get('ETag');
+        if (etag) chatETagRef.current = etag;
+        const json = await res.json();
+        if (!Array.isArray(json?.messages) || !isMounted) return;
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const msgs: ChatMessage[] = [];
-      snapshot.forEach((docSnap) => {
-        const data = docSnap.data() as any;
-        const resolvedTimestamp =
-          typeof data.serverTime?.toDate === 'function'
-            ? data.serverTime.toDate().toISOString()
-            : typeof data.serverTime?.seconds === 'number'
-            ? new Date(data.serverTime.seconds * 1000).toISOString()
-            : typeof data.timestamp === 'string' && data.timestamp
-            ? data.timestamp
-            : new Date().toISOString();
-
-        msgs.push({ 
-          id: docSnap.id, 
-          ...data,
-          timestamp: resolvedTimestamp
-        } as ChatMessage);
-      });
-      // Filter out duplicates just in case (optional but safe)
-      setMessages(msgs.reverse());
-      
-      if (!isChatOpenRef.current && !snapshot.metadata.hasPendingWrites) {
-        const addedCount = snapshot.docChanges().filter(c => c.type === 'added').length;
-        if (addedCount > 0) {
-          setUnreadCount(prev => prev + addedCount);
+        const nextMsgs: ChatMessage[] = json.messages;
+        if (!chatInitializedRef.current) {
+          nextMsgs.forEach(m => { if (m.id) knownChatIdsRef.current.add(m.id); });
+          chatInitializedRef.current = true;
+        } else {
+          let newOtherCount = 0;
+          nextMsgs.forEach(m => {
+            if (m.id && !knownChatIdsRef.current.has(m.id)) {
+              knownChatIdsRef.current.add(m.id);
+              if (m.senderEmail?.toLowerCase() !== user.email?.toLowerCase()) {
+                newOtherCount += 1;
+              }
+            }
+          });
+          if (!isChatOpenRef.current && newOtherCount > 0) {
+            setUnreadCount(prev => prev + newOtherCount);
+          }
         }
-      }
-    }, (error) => {
-      console.warn('[Chat] Listener notice:', error);
-    });
+        setMessages(nextMsgs);
+      } catch {}
+    };
 
-    return unsubscribe;
-  }, [user.email, authUid]);
+    fetchChatMessages();
+    const pollMs = isChatOpen ? 5000 : 30000;
+    const interval = setInterval(fetchChatMessages, pollMs);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        fetchChatMessages();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [user.email, isChatOpen]);
 
   useEffect(() => {
     if (isChatOpen) {
@@ -398,26 +389,54 @@ const RealtimeFeatures: React.FC<Props> = ({
 
   const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newMessage.trim() || !user.email || !auth.currentUser) return;
+    if (!newMessage.trim() || !user.email) return;
 
     const text = newMessage.trim();
     setNewMessage('');
 
     const userPhoto = user.photoURL || auth.currentUser?.photoURL || '';
     const userDisplayName = user.displayName || auth.currentUser?.displayName || user.email.split('@')[0];
+    const msgId = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const payload: ChatMessage = {
+      id: msgId,
+      text,
+      senderEmail: user.email,
+      senderName: userDisplayName,
+      photoURL: userPhoto,
+      timestamp: new Date().toISOString(),
+      outlet: user.selectedOutlet || 'UNKNOWN'
+    };
+
+    knownChatIdsRef.current.add(msgId);
+    setMessages(prev => [...prev, payload]);
 
     try {
-      await addDoc(collection(db, 'chat_messages'), {
-        text,
-        senderEmail: user.email,
-        senderName: userDisplayName,
-        photoURL: userPhoto,
-        timestamp: new Date().toISOString(),
-        serverTime: serverTimestamp(),
-        outlet: user.selectedOutlet || 'UNKNOWN'
+      const res = await fetch('/api/sync/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
       });
+      if (res.ok) {
+        chatETagRef.current = '';
+      }
     } catch (err) {
-      console.warn('[Chat] Send message failed:', err);
+      console.warn('[Chat] Server send notice:', err);
+    }
+
+    if (auth.currentUser && !isQuotaExceeded()) {
+      try {
+        await addDoc(collection(db, 'chat_messages'), {
+          text,
+          senderEmail: user.email,
+          senderName: userDisplayName,
+          photoURL: userPhoto,
+          timestamp: payload.timestamp,
+          serverTime: serverTimestamp(),
+          outlet: user.selectedOutlet || 'UNKNOWN'
+        });
+      } catch (err) {
+        console.warn('[Chat] Firestore backup notice:', err);
+      }
     }
   };
 

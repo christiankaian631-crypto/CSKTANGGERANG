@@ -7,6 +7,8 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+import { safeStorage } from '../lib/safeStorage';
+import { getSystemConfigShared, isQuotaExceeded } from '../services/cloudService';
 
 interface Props {
   allOutletsData: Record<string, any>;
@@ -43,6 +45,21 @@ export const RegionalStrategiMenuRecapTable: React.FC<Props> = ({
 
     const fetchCatalog = async () => {
       try {
+        const cfg = await getSystemConfigShared();
+        if (Array.isArray(cfg?.strategyCatalog) && cfg.strategyCatalog.length > 0) {
+          setCatalog(cfg.strategyCatalog);
+          try {
+            safeStorage.setItem('APP_STRATEGY_CATALOG', JSON.stringify(cfg.strategyCatalog));
+          } catch {}
+          return;
+        }
+      } catch {}
+
+      if (isQuotaExceeded()) return;
+      try {
+        const lastFetch = parseInt(safeStorage.getItem('APP_STRATEGY_CATALOG_FETCH_AT') || '0', 10);
+        if (lastFetch && Date.now() - lastFetch < 10 * 60 * 1000) return;
+        safeStorage.setItem('APP_STRATEGY_CATALOG_FETCH_AT', String(Date.now()));
         const catRef = doc(db, 'system_config', 'strategy_catalog');
         const snap = await getDoc(catRef);
         if (snap.exists()) {
